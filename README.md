@@ -125,15 +125,15 @@ git pull && docker compose up -d --build
 Workflow [ci.yml](.github/workflows/ci.yml) на каждый `push` в `main`:
 1. **`secret-scan`** — прогоняет `Gitleaks` по истории коммитов и блокирует сборку при случайной утечке токенов.
 2. **`lint-and-test`** — запускает `ruff check src tests` и `pytest -v`.
-3. **`deploy`** — если предыдущие шаги зелёные и заданы секреты сервера, подключается по SSH к Oracle Cloud, подтягивает код, пересобирает Docker-контейнер (`docker compose up -d --build`) с сохранением базы SQLite и проверяет, что бот поднялся.
+3. **`deploy`** — если предыдущие шаги зелёные и заданы секреты сервера, подключается по SSH к Oracle Cloud. На стороне сервера для этого ключа в `~/.ssh/authorized_keys` прописано жёсткое ограничение **SSH Forced Command** (`command="/usr/local/bin/deploy-weather-bot.sh",restrict`), поэтому этот ключ физически умеет запускать только скрипт обновления (`git pull && docker compose up -d --build`) и не может открыть shell или прочитать `.env`.
 
 ### Какие GitHub Secrets нужны для автодеплоя
 
 Добавьте в `Settings → Secrets and variables → Actions` (приватные токены бота туда добавлять **не нужно**, только доступ к серверу для деплоя):
 - `ORACLE_HOST` — публичный IP вашего Oracle VPS
 - `ORACLE_USER` — пользователь SSH (обычно `ubuntu` или `opc`)
-- `ORACLE_SSH_KEY` — приватный деплой-ключ SSH (желательно отдельный от личного)
-- `ORACLE_APP_DIR` *(опционально)* — путь к проекту на сервере (по умолчанию `~/weather-wardrobe-bot`)
+- `ORACLE_SSH_KEY` — приватный деплой-ключ SSH (с forced-command ограничением на сервере)
+- `ORACLE_PORT` *(опционально)* — порт SSH, если нестандартный (по умолчанию `22`)
 
 ---
 
