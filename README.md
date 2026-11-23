@@ -155,7 +155,7 @@ uv run pytest -v
 ├── .github/workflows/ci.yml           # Автопроверка ruff + pytest на каждый push/PR
 ├── .env.example                       # Шаблон переменных окружения
 ├── Dockerfile                         # Multi-arch образ (ARM64 + AMD64, non-root user)
-├── docker-compose.yml                 # Конфиг запуска с volume ./data:/app/data
+├── docker-compose.yml                 # Конфиг запуска с volume bot_data:/app/data
 ├── pyproject.toml                     # Зависимости и настройки pytest/ruff
 ├── src/weather_wardrobe/
 │   ├── config.py                      # Pydantic Settings
