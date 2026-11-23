@@ -1,7 +1,6 @@
 services:
   weather-bot:
     build: .
-    container_name: weather-wardrobe-bot
     restart: unless-stopped
     env_file:
       - .env

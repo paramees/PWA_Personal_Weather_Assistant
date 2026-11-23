@@ -7,6 +7,7 @@ import httpx
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BotCommand
 
 from weather_wardrobe.bot.handlers import forecast, settings, start
@@ -22,15 +23,22 @@ logger = logging.getLogger(__name__)
 
 
 async def _configure_commands(bot: Bot) -> None:
-    await bot.set_my_commands(
-        [
-            BotCommand(command="today", description="Прогноз и одежда на сегодня"),
-            BotCommand(command="tomorrow", description="Прогноз и одежда на завтра"),
-            BotCommand(command="settings", description="Город, расписание и термокомфорт"),
-            BotCommand(command="wardrobe", description="Мой реальный гардероб"),
-            BotCommand(command="help", description="Справка по боту"),
-        ]
-    )
+    desired = [
+        BotCommand(command="today", description="Прогноз и одежда на сегодня"),
+        BotCommand(command="tomorrow", description="Прогноз и одежда на завтра"),
+        BotCommand(command="settings", description="Город, расписание и термокомфорт"),
+        BotCommand(command="wardrobe", description="Мой реальный гардероб"),
+        BotCommand(command="help", description="Справка по боту"),
+    ]
+    try:
+        existing = await bot.get_my_commands()
+        if [(c.command, c.description) for c in existing] == [
+            (c.command, c.description) for c in desired
+        ]:
+            return
+        await bot.set_my_commands(desired)
+    except TelegramAPIError as exc:
+        logger.warning("Skipping set_my_commands due to Telegram API error: %s", exc)
 
 
 async def run_bot() -> None:
@@ -41,6 +49,7 @@ async def run_bot() -> None:
     logging.basicConfig(
         level=getattr(logging, app_settings.log_level.upper(), logging.INFO),
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        force=True,
     )
 
     repo = Repository(app_settings.db_path)
