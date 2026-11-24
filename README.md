@@ -1,179 +1,197 @@
-# 🌦 Weather Wardrobe Bot — Погодный гардеробщик
+**English** | [Русский](README.ru.md)
 
-Персональный Telegram-бот, который в нужные дни и часы присылает прогноз погоды в человеческом виде: предупреждает о дожде, ветре и перепадах температуры и подсказывает, **что именно надеть сегодня** (включая вещи из вашего реального шкафа).
+# 🌦 Weather Wardrobe Bot
 
-Проект спроектирован для **полностью бесплатного 24/7 хостинга на Oracle Cloud Free Tier** (ARM64 Ampere A1 и AMD64) с минималистичным Docker-стеком и гибридной **Deterministic + AI** архитектурой.
+A personal Telegram bot that tells you **what to wear today**. On the days and times you choose, it sends a compact weather card, warns you about rain, wind and big temperature swings, analyzes your commute, and recommends an outfit, optionally from the clothes you actually own.
 
----
-
-## ✨ Возможности
-
-- **Компактный mobile-first интерфейс:** минимум лишнего текста и 3 главные кнопки (`🌤 Сегодня`, `📅 Завтра`, `⚙️ Настройки`).
-- **Анализ маршрута (`🚶 Маршрут`):** задайте Точку Б (офис, учёба, район), дни недели, время выхода/возвращения и способ (пешком, велосипед, транспорт, авто). Бот проверит погоду по дороге туда, днём в точке назначения и обратно (велосипедистам при дожде советует дождевик, а не зонт).
-- **Настройка расписания прямо в чате:** для каждого из 7 дней недели можно задать своё время отправки (пресеты или произвольное `ЧЧ:ММ`) либо выключить уведомление в конкретные дни.
-- **Умный выбор локации:** поиск города/района по названию (Open-Meteo + Nominatim) с автоматическим IANA-часовым поясом или отправка Telegram-геопозиции.
-- **Персональный термокомфорт и гардероб:** поправка от `-5°C` до `+5°C` (+ быстрые кнопки под прогнозом), свой список курток/обуви и ответы ИИ на свободные вопросы в чате.
+It is designed to run **24/7 for free** on Oracle Cloud Free Tier (Docker Compose, AMD64 and ARM64) and uses a hybrid **deterministic + LLM** architecture that keeps working even when the AI provider is down.
 
 ---
 
-## 🏗 Архитектура
+## ✨ Features
+
+- **Compact, mobile-first UI**: three main buttons (`🌤 Today`, `📅 Tomorrow`, `⚙️ Settings`) and short, scannable messages.
+- **Per-day schedule**: set a different send time for each weekday, or switch individual days off, all from inside the chat.
+- **Commute analysis (`🚶 Route`)**: set a destination, weekdays, departure/return hours and transport mode (walk, bike, transit, car). The bot compares the weather at home and at the destination for the trip there, the day at the destination and the trip back. Cyclists get a raincoat recommendation instead of an umbrella, plus a lower wind threshold.
+- **Smart location**: search by city, district or address (Open-Meteo geocoding with a Nominatim fallback) or send a Telegram location pin. The IANA timezone is detected automatically.
+- **Personal thermal comfort**: an offset from `-5°C` to `+5°C`, tuned by the `🥶 Cold` / `👍 Ok` / `🥵 Warm` buttons under each forecast.
+- **Your wardrobe + AI stylist**: describe your clothes in free text and the LLM picks from them (for example, no suede in the rain).
+- **Free-text questions**: ask *"will I be cold in a windbreaker tonight?"* and get an answer grounded in the real forecast.
+- **Private by design**: an optional `ALLOWED_USER_IDS` allow-list restricts who can use the bot.
+
+---
+
+## 🏗 Architecture
 
 ```mermaid
 flowchart LR
-    TG["Telegram User"] -->|Команды / кнопки / геолокация| BOT["aiogram 3 Bot + FSM"]
-    SCHED["APScheduler (1-min tick, UTC -> User TZ)"] -->|По расписанию| BOT
-    BOT <--> DB[("SQLite WAL (профили, расписание, доставка)")]
-    BOT --> METEO["Open-Meteo API (без ключа)"]
-    METEO --> ANALYZER["Deterministic Weather Analyzer (слоты + алерты)"]
-    ANALYZER --> AI1["Primary LLM (напр. Groq)"]
-    AI1 -->|Успешный JSON| GUARD["Safety Guardrails (зонт / УФ / мороз)"]
-    AI1 -.->|429 / 503 / таймаут| AI2["Fallback LLM (напр. Cerebras / Gemini)"]
-    AI2 -->|Успешный JSON| GUARD
-    AI2 -.->|Все LLM недоступны или нет ключей| RULES["Rule-Based Advisor (базовые правила)"]
+    TG["Telegram user"] -->|commands / buttons / location| BOT["aiogram 3 bot + FSM"]
+    SCHED["APScheduler (1-min tick, UTC to user TZ)"] -->|on schedule| BOT
+    BOT <--> DB[("SQLite, WAL mode")]
+    BOT --> METEO["Open-Meteo API (no key)"]
+    METEO --> ANALYZER["Deterministic analyzers (day slots, alerts, commute)"]
+    ANALYZER --> AI1["Primary LLM"]
+    AI1 -->|valid JSON| GUARD["Safety guardrails (umbrella / raincoat / UV / cold)"]
+    AI1 -.->|429 / 5xx / timeout| AI2["Fallback LLM (optional)"]
+    AI2 -->|valid JSON| GUARD
+    AI2 -.->|all providers down or no keys| RULES["Rule-based advisor"]
     ANALYZER --> RULES
-    RULES --> FMT["HTML Formatter"]
+    RULES --> FMT["HTML formatter"]
     GUARD --> FMT
     FMT --> TG
 ```
 
-### Зачем здесь ИИ и где работают обычные алгоритмы
+### Where AI helps, and where plain code is better
 
-На практике ИИ нужно внедрять не везде подряд, а только туда, где жёсткие `if/else` правила проигрывают по гибкости:
-
-| Задача | Что используется | Почему именно так |
+| Task | Approach | Why |
 | --- | --- | --- |
-| Таймзоны, расписание, защита от повторной отправки | **Обычный алгоритм + SQLite** | Должно работать со 100% точностью и идемпотентностью (`PRIMARY KEY` в `delivery_logs`). |
-| Агрегация погоды за активное окно (`08:00–21:00`), интервалы дождя (`14:00–17:00`), порывы ветра, перепад температур | **Детерминированная математика** | LLM не должны считать средние значения и сравнивать числа — надёжнее и быстрее посчитать в Python. |
-| Жёсткие правила безопасности (взять зонт при вероятности дождя ≥ 45%, УФ-защита, шапка/перчатки в мороз) | **Детерминированные Guardrails** | Даже если нейросеть забудет упомянуть зонт, пост-валидация (`_enforce_safety_invariants`) гарантированно вернёт его в ответ. |
-| Разбор произвольного текста гардероба (*«замшевые ботинки, тонкий тренч»*) и отсев неподходящих материалов в дождь | **ИИ (LLM, JSON Structured Output)** | Неструктурированный текст невозможно надёжно разобрать регулярками — языковая модель понимает материалы и сочетаемость вещей. |
-| Ответы на свободные вопросы (*«Успею дойти без зонта до 18:00?»*) | **ИИ (LLM)** | Генерация естественного контекстного ответа поверх точного прогноза. |
-| Отказоустойчивость (если API нейросети упал, превысил лимит или не настроен) | **Каскад `Primary LLM → Fallback LLM → RuleBasedAdvisor`** | Бот автоматически переключается на резервного провайдера (например, с Groq на Cerebras) или на метео-правила без сбоев доставки. |
+| Timezones, scheduling, no duplicate sends | Plain code + SQLite | Must be exact and idempotent (`PRIMARY KEY` in `delivery_logs`). |
+| Aggregating hourly weather, rain windows, wind, temperature swings, commute legs | Deterministic Python | LLMs should not do arithmetic or compare numbers. |
+| Hard safety rules (umbrella / raincoat, UV, gloves in frost) | Deterministic guardrails | Even if the LLM forgets, `_enforce_safety_invariants` adds the item back. |
+| Understanding a free-text wardrobe and choosing suitable items | LLM (JSON output) | Free text and material awareness are impractical to hand-code. |
+| Answering free-form questions about the day | LLM | Natural-language answers on top of exact data. |
+| Resilience | `Primary LLM → Fallback LLM → rule-based advisor` | The daily message is always delivered, even without any API key. |
 
 ---
 
-## 🤖 Подключение бесплатного ИИ с авто-резервом (опционально)
+## 🤖 Free LLM providers (optional)
 
-Бот работает по стандартному **OpenAI-compatible Chat Completions API** через лёгкий `httpx` без тяжёлых SDK и поддерживает **цепочку из двух провайдеров** (`Primary → Fallback → Правила`). Если оставить оба ключа пустыми, бот работает полностью на детерминированных метео-правилах.
+The bot talks to any **OpenAI-compatible Chat Completions API** over plain `httpx`. With no API keys at all it runs in rule-based mode. Up to two providers can be chained (primary, then fallback).
 
-| Провайдер | Бесплатный лимит и плюсы | Настройки для `.env` |
+| Provider | Notes | `.env` settings |
 | --- | --- | --- |
-| **Groq** (рекомендуется как Primary) | 30 RPM / 1 000 RPD / до 200K–500K токенов/день, без карты, выделенные лимиты на аккаунт | `LLM_BASE_URL=https://api.groq.com/openai/v1`<br>`LLM_MODEL=llama-3.3-70b-versatile` |
-| **Cerebras** (отличный Fallback / Primary) | ~1 000 000 токенов в день бесплатно без карты, рекордная скорость инференса | `LLM_FALLBACK_BASE_URL=https://api.cerebras.ai/v1`<br>`LLM_FALLBACK_MODEL=gpt-oss-120b` |
-| **Google AI Studio (Gemini)** | Бесплатный Free Tier по API-ключу (иногда бывает 503 при пиках нагрузки — удобно ставить как Fallback) | `LLM_FALLBACK_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/`<br>`LLM_FALLBACK_MODEL=gemini-4-hydrogen` |
-| **OpenRouter (`:free`)** | Агрегатор 20+ бесплатных моделей (50 RPD бесплатно, 1 000 RPD при разовом пополнении $10) | `LLM_FALLBACK_BASE_URL=https://openrouter.ai/api/v1`<br>`LLM_FALLBACK_MODEL=openrouter/free` |
-| **Ollama (локально / на сервере)** | Полностью локально, без лимитов | `LLM_BASE_URL=http://host.docker.internal:11434/v1`<br>`LLM_MODEL=llama3.2` |
+| **Groq** (recommended primary) | Free tier, no credit card; limits are tracked per model | `LLM_BASE_URL=https://api.groq.com/openai/v1`<br>`LLM_MODEL=llama-3.3-70b-versatile` |
+| **Cerebras** | Generous free daily token allowance | `LLM_FALLBACK_BASE_URL=https://api.cerebras.ai/v1`<br>`LLM_FALLBACK_MODEL=gpt-oss-120b` |
+| **Google AI Studio (Gemini)** | Free tier; can be overloaded at peak times | `LLM_FALLBACK_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/`<br>`LLM_FALLBACK_MODEL=<model id>` |
+| **OpenRouter** (`:free` models) | Aggregator of free models | `LLM_FALLBACK_BASE_URL=https://openrouter.ai/api/v1` |
+| **Ollama** (self-hosted) | No limits, runs locally | `LLM_BASE_URL=http://host.docker.internal:11434/v1`<br>`LLM_MODEL=llama3.2` |
 
-Погодный API **Open-Meteo** полностью бесплатный и вообще не требует API-ключа.
+Provider limits and model names change often, so check each provider's documentation. The weather data comes from **Open-Meteo**, which is free and needs no key.
 
 ---
 
-## 🚀 Быстрый запуск локально
+## 🚀 Quick start (local)
 
-Требуется **Python 3.11+** (удобнее всего запускать через [`uv`](https://docs.astral.sh/uv/)).
+Requires **Python 3.11+**. [`uv`](https://docs.astral.sh/uv/) is recommended.
 
 ```bash
-# 1. Клонировать репозиторий и перейти в папку
+git clone <your-repo-url> weather-wardrobe-bot
 cd weather-wardrobe-bot
 
-# 2. Создать конфигурацию из шаблона
 cp .env.example .env
-# Впишите BOT_TOKEN от @BotFather (и опционально LLM_API_KEY)
+# Set BOT_TOKEN (from @BotFather) and optionally LLM_API_KEY
 
-# 3. Установить зависимости и запустить бота
 uv sync --extra dev
 uv run weather-bot
 ```
 
-Для приватного использования на личном сервере укажите ваш Telegram ID в `ALLOWED_USER_IDS=123456789` (узнать ID можно через `@userinfobot`).
+To keep the bot private, set `ALLOWED_USER_IDS=123456789,987654321` (get your ID from `@userinfobot`).
+
+### Configuration
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `BOT_TOKEN` | yes | Telegram bot token from `@BotFather`. |
+| `ALLOWED_USER_IDS` | no | Comma-separated Telegram user IDs. Empty means anyone can use the bot. |
+| `DB_PATH` | no | SQLite path (default `data/bot.db`; the Docker image uses `/app/data/bot.db`). |
+| `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL` | no | Primary LLM provider. |
+| `LLM_FALLBACK_API_KEY`, `LLM_FALLBACK_BASE_URL`, `LLM_FALLBACK_MODEL` | no | Optional fallback LLM provider. |
+| `LLM_TIMEOUT_SECONDS` | no | Per-request LLM timeout (default `15`). |
+| `LOG_LEVEL` | no | `DEBUG`, `INFO`, `WARNING` or `ERROR`. |
 
 ---
 
-## ☁️ Деплой 24/7 на Oracle Cloud Free Tier (Docker Compose)
+## ☁️ Deploy on Oracle Cloud Free Tier (Docker Compose)
 
-Образ собирается на базе `python:3.12-slim` и работает как на **ARM64 (Ampere A1)**, так и на **AMD64** без изменений. Бот использует Long Polling — открывать входящие порты и настраивать домены/SSL не нужно.
+The image is built on `python:3.12-slim` and runs on both **AMD64** and **ARM64**. The bot uses long polling, so you do not need open inbound ports, a domain or TLS. SQLite lives in a named Docker volume (`bot_data`), so it survives rebuilds and works regardless of the host user's UID.
 
 ```bash
-# 1. На VPS с Oracle Linux / Ubuntu установите Docker и Docker Compose plugin
-# 2. Склонируйте репозиторий:
-git clone <URL_ВАШЕГО_РЕПОЗИТОРИЯ> weather-wardrobe-bot
+# On an Ubuntu VPS with Docker and the Compose plugin installed
+git clone <your-repo-url> weather-wardrobe-bot
 cd weather-wardrobe-bot
 
-# 3. Создайте .env и заполните BOT_TOKEN (и при желании LLM_API_KEY, ALLOWED_USER_IDS)
 cp .env.example .env
-nano .env
+nano .env              # fill in BOT_TOKEN (and optionally LLM_API_KEY, ALLOWED_USER_IDS)
 
-# 4. Подготовьте папку для постоянной базы SQLite и запустите контейнер
-mkdir -p data
 docker compose up -d --build
-
-# 5. Проверьте логи
 docker compose logs -f
 ```
 
-Перезапуск после обновления кода вручную:
-```bash
-git pull && docker compose up -d --build
-```
+> On a 1 GB RAM instance (for example `VM.Standard.E2.1.Micro`), add a 1–2 GB swap file before building the image.
 
 ---
 
-## 🔐 Автодеплой (CI/CD) и защита секретов
+## 🔐 CI/CD and secrets handling
 
-Вся чувствительная конфигурация (`BOT_TOKEN`, `LLM_API_KEY`, `LLM_FALLBACK_API_KEY`, `ALLOWED_USER_IDS`) хранится **в одном файле `.env` прямо на сервере Oracle Cloud** и заблокирована в `.gitignore` (вместе с `*.pem`, `*.key`, `id_ed25519*` и др.).
+All secrets (`BOT_TOKEN`, API keys, `ALLOWED_USER_IDS`) live in a single `.env` file **on the server only**. `.env`, `*.pem`, `*.key` and SSH key patterns are git-ignored, and only `.env.example` is tracked.
 
-Workflow [ci.yml](.github/workflows/ci.yml) на каждый `push` в `main`:
-1. **`secret-scan`** — прогоняет `Gitleaks` по истории коммитов и блокирует сборку при случайной утечке токенов.
-2. **`lint-and-test`** — запускает `ruff check src tests` и `pytest -v`.
-3. **`deploy`** — если предыдущие шаги зелёные и заданы секреты сервера, подключается по SSH к Oracle Cloud. На стороне сервера для этого ключа в `~/.ssh/authorized_keys` прописано жёсткое ограничение **SSH Forced Command** (`command="/usr/local/bin/deploy-weather-bot.sh",restrict`), поэтому этот ключ физически умеет запускать только скрипт обновления (`git pull && docker compose up -d --build`) и не может открыть shell или прочитать `.env`.
+The workflow in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main`:
 
-### Какие GitHub Secrets нужны для автодеплоя
+1. **`secret-scan`**: [Gitleaks](https://github.com/gitleaks/gitleaks) scans the repository history for leaked credentials.
+2. **`lint-and-test`**: `ruff check src tests` and `pytest -v`.
+3. **`deploy`**: runs only if the first two jobs pass. It connects to the server over SSH using a dedicated deploy key. On the server that key is restricted with an SSH **forced command** in `authorized_keys`:
 
-Добавьте в `Settings → Secrets and variables → Actions` (приватные токены бота туда добавлять **не нужно**, только доступ к серверу для деплоя):
-- `ORACLE_HOST` — публичный IP вашего Oracle VPS
-- `ORACLE_USER` — пользователь SSH (обычно `ubuntu` или `opc`)
-- `ORACLE_SSH_KEY` — приватный деплой-ключ SSH (с forced-command ограничением на сервере)
-- `ORACLE_PORT` *(опционально)* — порт SSH, если нестандартный (по умолчанию `22`)
+   ```text
+   command="/usr/local/bin/deploy-weather-bot.sh",restrict ssh-ed25519 AAAA... gh-actions-deploy
+   ```
+
+   so even a leaked deploy key can only trigger the fixed update script (`git reset --hard origin/main && docker compose up -d --build`). It cannot open a shell or read `.env`. The script uses `flock` so concurrent deploys never overlap.
+
+If the deploy secrets are not configured, the deploy job is skipped and the pipeline stays green.
+
+### Required GitHub Actions secrets
+
+| Secret | Description |
+| --- | --- |
+| `ORACLE_HOST` | Public IP or hostname of the server. |
+| `ORACLE_USER` | SSH user (usually `ubuntu`). |
+| `ORACLE_SSH_KEY` | Private deploy key (restricted by the forced command above). |
+| `ORACLE_PORT` | Optional, defaults to `22`. |
+
+For a private repository, give the server a separate **read-only deploy key** (GitHub repository settings, *Deploy keys*, write access off) so it can `git fetch`.
 
 ---
 
-## 🧪 Тестирование и линтер
-
-В проекте настроены unit/integration тесты (`pytest`) с моками HTTP (`httpx.MockTransport`), проверкой SQLite-репозитория, часовых поясов планировщика, предохранителей ИИ и HTML-экранирования, а также CI в GitHub Actions.
+## 🧪 Development
 
 ```bash
+uv sync --extra dev
 uv run ruff check src tests
 uv run pytest -v
 ```
 
+The test suite uses mocked HTTP (`httpx.MockTransport`) and covers the weather and commute analyzers, rule-based advice, LLM parsing, guardrails and failover, the SQLite repository, timezone-aware scheduling and HTML escaping.
+
 ---
 
-## 📁 Структура проекта
+## 📁 Project layout
 
 ```text
 .
-├── .github/workflows/ci.yml           # Автопроверка ruff + pytest на каждый push/PR
-├── .env.example                       # Шаблон переменных окружения
-├── Dockerfile                         # Multi-arch образ (ARM64 + AMD64, non-root user)
-├── docker-compose.yml                 # Конфиг запуска с volume bot_data:/app/data
-├── pyproject.toml                     # Зависимости и настройки pytest/ruff
+├── .github/workflows/ci.yml           # secret scan, lint, tests, deploy
+├── .env.example                       # configuration template
+├── Dockerfile                         # python:3.12-slim, non-root user
+├── docker-compose.yml                 # service + bot_data volume
+├── pyproject.toml                     # dependencies, pytest and ruff config
 ├── src/weather_wardrobe/
-│   ├── config.py                      # Pydantic Settings
-│   ├── models.py                      # Доменные модели погоды, профиля и советов
-│   ├── main.py                        # Точка входа, DI, запуск планировщика и polling
-│   ├── db/
-│   │   └── repository.py              # Асинхронный SQLite (WAL, расписания, delivery_logs)
+│   ├── config.py                      # pydantic settings, LLM provider chain
+│   ├── models.py                      # domain models
+│   ├── main.py                        # entry point, wiring, polling loop
+│   ├── db/repository.py               # async SQLite (users, schedules, routes, deliveries)
 │   ├── services/
-│   │   ├── open_meteo.py              # Клиент Open-Meteo (geocoding + forecast) + Nominatim
-│   │   ├── weather_analyzer.py        # Расчёт слотов дня и детерминированных алертов
-│   │   ├── route_analyzer.py          # Анализ маршрута Дом ↔ Точка Б (туда / там / обратно)
-│   │   ├── rule_advisor.py            # Полностью автономный алгоритм подбора одежды
-│   │   ├── ai_advisor.py              # Гибридный ИИ-стилист + Guardrails + Fallback + Q&A
-│   │   ├── formatter.py               # Форматирование HTML-сообщений с экранированием
-│   │   └── scheduler.py               # Планировщик с учётом IANA-таймзон
-│   └── bot/
-│       ├── middleware.py              # Белый список ALLOWED_USER_IDS
-│       ├── states.py                  # FSM-состояния ввода города, времени, гардероба
-│       ├── keyboards.py               # Inline и Reply клавиатуры
-│       └── handlers/                  # Команды /start, /settings, /wardrobe, /today, Q&A
-└── tests/                             # Полный набор тестов (analyzer, rules, ai, db, scheduler, formatter)
+│   │   ├── open_meteo.py              # weather, geocoding, Nominatim fallback
+│   │   ├── weather_analyzer.py        # day slots and deterministic alerts
+│   │   ├── route_analyzer.py          # commute analysis (there / at destination / back)
+│   │   ├── rule_advisor.py            # standalone rule-based outfit advisor
+│   │   ├── ai_advisor.py              # LLM advisor, guardrails, failover, Q&A
+│   │   ├── formatter.py               # compact HTML messages
+│   │   └── scheduler.py               # timezone-aware per-minute scheduler
+│   └── bot/                           # keyboards, FSM states, middleware, handlers
+└── tests/                             # pytest suite
 ```
+
+---
+
+## 📄 License
+
+No license file is included yet. Add one (for example MIT) before sharing the code publicly.
