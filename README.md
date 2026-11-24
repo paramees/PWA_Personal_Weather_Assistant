@@ -1,4 +1,4 @@
-**English** | [Русский](README.ru.md)
+**English** | [Українська](README.uk.md)
 
 # 🌦 Weather Wardrobe Bot
 
