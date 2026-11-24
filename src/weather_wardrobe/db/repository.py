@@ -8,9 +8,7 @@ from typing import Any, Literal
 import aiosqlite
 
 from weather_wardrobe.models import (
-    CommuteRoute,
     DaySchedule,
-    TransportMode,
     UserProfile,
 )
 
@@ -57,21 +55,6 @@ CREATE TABLE IF NOT EXISTS delivery_logs (
     PRIMARY KEY (user_id, local_date, schedule_time),
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
-
-CREATE TABLE IF NOT EXISTS routes (
-    user_id INTEGER PRIMARY KEY,
-    enabled INTEGER NOT NULL DEFAULT 0,
-    destination_name TEXT,
-    dest_latitude REAL,
-    dest_longitude REAL,
-    dest_timezone TEXT,
-    weekdays TEXT NOT NULL DEFAULT '0,1,2,3,4',
-    depart_hour INTEGER NOT NULL DEFAULT 8,
-    return_hour INTEGER NOT NULL DEFAULT 18,
-    transport_mode TEXT NOT NULL DEFAULT 'walk',
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-);
 """
 
 
@@ -103,43 +86,6 @@ def _row_to_schedule(row: aiosqlite.Row) -> DaySchedule:
         weekday=row["weekday"],
         enabled=bool(row["enabled"]),
         send_time=row["send_time"],
-    )
-
-
-def _parse_weekdays(raw: str) -> list[int]:
-    days: list[int] = []
-    for part in raw.split(","):
-        cleaned = part.strip()
-        if not cleaned:
-            continue
-        try:
-            val = int(cleaned)
-        except ValueError:
-            continue
-        if 0 <= val <= 6 and val not in days:
-            days.append(val)
-    return sorted(days)
-
-
-def _serialize_weekdays(weekdays: list[int]) -> str:
-    return ",".join(str(d) for d in sorted({d for d in weekdays if 0 <= d <= 6}))
-
-
-def _row_to_route(row: aiosqlite.Row) -> CommuteRoute:
-    mode_raw = row["transport_mode"]
-    mode: TransportMode = (
-        mode_raw if mode_raw in ("walk", "bike", "transit", "car") else "walk"
-    )
-    return CommuteRoute(
-        enabled=bool(row["enabled"]),
-        destination_name=row["destination_name"],
-        dest_latitude=row["dest_latitude"],
-        dest_longitude=row["dest_longitude"],
-        dest_timezone=row["dest_timezone"],
-        weekdays=_parse_weekdays(row["weekdays"]),
-        depart_hour=row["depart_hour"],
-        return_hour=row["return_hour"],
-        transport_mode=mode,
     )
 
 
@@ -192,13 +138,6 @@ class Repository:
                 """,
                 (user_id, weekday),
             )
-        await self.conn.execute(
-            """
-            INSERT OR IGNORE INTO routes (user_id, updated_at)
-            VALUES (?, ?)
-            """,
-            (user_id, now),
-        )
 
     async def get_or_create_user(self, user_id: int) -> UserProfile:
         """Fetch an existing user profile or create one with default 7-day schedules."""
@@ -494,125 +433,3 @@ class Repository:
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
-
-    async def get_route(self, user_id: int) -> CommuteRoute:
-        """Fetch user's commute route settings, initializing default row if missing."""
-        async with self._lock:
-            await self._ensure_user_locked(user_id)
-            await self.conn.commit()
-            cursor = await self.conn.execute(
-                "SELECT * FROM routes WHERE user_id = ?",
-                (user_id,),
-            )
-            row = await cursor.fetchone()
-            assert row is not None
-            return _row_to_route(row)
-
-    async def upsert_route_destination(
-        self,
-        user_id: int,
-        name: str,
-        latitude: float,
-        longitude: float,
-        timezone: str,
-    ) -> None:
-        async with self._lock:
-            await self._ensure_user_locked(user_id)
-            await self.conn.execute(
-                """
-                UPDATE routes
-                SET enabled = 1,
-                    destination_name = ?,
-                    dest_latitude = ?,
-                    dest_longitude = ?,
-                    dest_timezone = ?,
-                    updated_at = ?
-                WHERE user_id = ?
-                """,
-                (name, latitude, longitude, timezone, _utc_now_iso(), user_id),
-            )
-            await self.conn.commit()
-
-    async def set_route_enabled(self, user_id: int, enabled: bool) -> None:
-        async with self._lock:
-            await self._ensure_user_locked(user_id)
-            await self.conn.execute(
-                "UPDATE routes SET enabled = ?, updated_at = ? WHERE user_id = ?",
-                (int(enabled), _utc_now_iso(), user_id),
-            )
-            await self.conn.commit()
-
-    async def update_route_hours(self, user_id: int, depart_hour: int, return_hour: int) -> None:
-        if not (0 <= depart_hour < return_hour <= 23):
-            raise ValueError("depart_hour must be less than return_hour within 0..23")
-        async with self._lock:
-            await self._ensure_user_locked(user_id)
-            await self.conn.execute(
-                """
-                UPDATE routes
-                SET depart_hour = ?, return_hour = ?, updated_at = ?
-                WHERE user_id = ?
-                """,
-                (depart_hour, return_hour, _utc_now_iso(), user_id),
-            )
-            await self.conn.commit()
-
-    async def update_route_transport(self, user_id: int, mode: TransportMode) -> None:
-        async with self._lock:
-            await self._ensure_user_locked(user_id)
-            await self.conn.execute(
-                "UPDATE routes SET transport_mode = ?, updated_at = ? WHERE user_id = ?",
-                (mode, _utc_now_iso(), user_id),
-            )
-            await self.conn.commit()
-
-    async def toggle_route_weekday(self, user_id: int, weekday: int) -> list[int]:
-        if not 0 <= weekday <= 6:
-            raise ValueError("weekday must be in 0..6")
-        async with self._lock:
-            await self._ensure_user_locked(user_id)
-            cursor = await self.conn.execute(
-                "SELECT weekdays FROM routes WHERE user_id = ?",
-                (user_id,),
-            )
-            row = await cursor.fetchone()
-            assert row is not None
-            days = _parse_weekdays(row["weekdays"])
-            if weekday in days:
-                days.remove(weekday)
-            else:
-                days.append(weekday)
-                days.sort()
-            await self.conn.execute(
-                "UPDATE routes SET weekdays = ?, updated_at = ? WHERE user_id = ?",
-                (_serialize_weekdays(days), _utc_now_iso(), user_id),
-            )
-            await self.conn.commit()
-            return days
-
-    async def set_route_weekdays(self, user_id: int, weekdays: list[int]) -> None:
-        async with self._lock:
-            await self._ensure_user_locked(user_id)
-            await self.conn.execute(
-                "UPDATE routes SET weekdays = ?, updated_at = ? WHERE user_id = ?",
-                (_serialize_weekdays(weekdays), _utc_now_iso(), user_id),
-            )
-            await self.conn.commit()
-
-    async def clear_route(self, user_id: int) -> None:
-        async with self._lock:
-            await self._ensure_user_locked(user_id)
-            await self.conn.execute(
-                """
-                UPDATE routes
-                SET enabled = 0,
-                    destination_name = NULL,
-                    dest_latitude = NULL,
-                    dest_longitude = NULL,
-                    dest_timezone = NULL,
-                    updated_at = ?
-                WHERE user_id = ?
-                """,
-                (_utc_now_iso(), user_id),
-            )
-            await self.conn.commit()

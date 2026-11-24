@@ -7,8 +7,6 @@ import httpx
 
 from weather_wardrobe.config import Settings
 from weather_wardrobe.models import (
-    CommuteLegSummary,
-    CommuteSummary,
     DayWeatherSummary,
     SlotSummary,
     UserProfile,
@@ -265,60 +263,3 @@ async def test_answer_question_failover_to_fallback_provider() -> None:
 
     assert calls == ["mock.primary.local", "mock.fallback.local"]
     assert reply == "Лучше накинуть ветровку."
-
-
-async def test_ai_advisor_bike_guardrail_adds_raincoat_not_umbrella() -> None:
-    captured_payload: dict[str, object] = {}
-    llm_json = json.dumps(
-        {
-            "headline": "Свежо",
-            "top": "Футболка и кофта",
-            "outerwear": "Лёгкая куртка",
-            "bottom": "Джинсы",
-            "footwear": "Кроссовки",
-            "accessories": [],
-            "pro_tip": "Осторожнее на дороге.",
-        },
-        ensure_ascii=False,
-    )
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal captured_payload
-        captured_payload = json.loads(request.content.decode("utf-8"))
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_json}}]})
-
-    leg = CommuteLegSummary(
-        hour=8,
-        temp=10.0,
-        apparent_temp=8.0,
-        wind_speed_ms=7.0,
-        wind_gusts_ms=10.0,
-        precip_prob=10,
-        precipitation_mm=0.0,
-        condition_emoji="⛅",
-        condition_text="Облачно",
-        is_rain=False,
-    )
-    commute = CommuteSummary(
-        origin_name="Дом",
-        destination_name="Офис",
-        transport_mode="bike",
-        way_there=leg,
-        at_destination_temp_min=10.0,
-        at_destination_temp_max=12.0,
-        at_destination_condition_emoji="⛅",
-        at_destination_condition_text="Облачно",
-        way_back=leg.model_copy(update={"hour": 18, "is_rain": True, "precip_prob": 80}),
-        rain_on_way_there=False,
-        rain_on_way_back=True,
-        wind_warning=True,
-    )
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        advisor = HybridOutfitAdvisor(client, _settings())
-        advice = await advisor.advise(_make_summary(), UserProfile(user_id=1), commute=commute)
-
-    assert any("дождевик" in item.lower() for item in advice.accessories)
-    assert not any("зонт" in item.lower() for item in advice.accessories)
-    user_msg = captured_payload["messages"][1]["content"]  # type: ignore[index]
-    assert '"transport_mode": "bike"' in user_msg

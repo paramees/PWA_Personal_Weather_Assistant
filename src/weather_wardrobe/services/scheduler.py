@@ -13,7 +13,6 @@ from weather_wardrobe.db.repository import Repository
 from weather_wardrobe.services.ai_advisor import HybridOutfitAdvisor
 from weather_wardrobe.services.formatter import format_forecast_message
 from weather_wardrobe.services.open_meteo import OpenMeteoClient
-from weather_wardrobe.services.route_analyzer import compute_day_commute
 from weather_wardrobe.services.weather_analyzer import analyze_day
 
 logger = logging.getLogger(__name__)
@@ -96,21 +95,12 @@ class ForecastScheduler:
                     active_start_hour=user.active_start_hour,
                     active_end_hour=user.active_end_hour,
                 )
-                route = await self.repo.get_route(user.user_id)
-                commute = await compute_day_commute(
-                    self.weather_client,
-                    user,
-                    route,
-                    points,
-                    local_now.date(),
-                )
                 recent_feedback = await self.repo.get_recent_feedback(user.user_id, limit=5)
-                advice = await self.advisor.advise(summary, user, recent_feedback, commute=commute)
+                advice = await self.advisor.advise(summary, user, recent_feedback)
                 text = format_forecast_message(
                     summary,
                     advice,
                     is_tomorrow=False,
-                    commute=commute,
                 )
 
                 await self.bot.send_message(

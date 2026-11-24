@@ -2,7 +2,7 @@
 
 # 🌦 Weather Wardrobe Bot
 
-A personal Telegram bot that tells you **what to wear today**. On the days and times you choose, it sends a compact weather card, warns you about rain, wind and big temperature swings, analyzes your commute, and recommends an outfit, optionally from the clothes you actually own.
+A personal Telegram bot that tells you **what to wear today**. On the days and times you choose, it sends a compact weather card for today or tomorrow, warns you about rain, wind and big temperature swings, and recommends an outfit, optionally from the clothes you actually own.
 
 It is designed to run **24/7 for free** on Oracle Cloud Free Tier (Docker Compose, AMD64 and ARM64) and uses a hybrid **deterministic + LLM** architecture that keeps working even when the AI provider is down.
 
@@ -10,13 +10,11 @@ It is designed to run **24/7 for free** on Oracle Cloud Free Tier (Docker Compos
 
 ## ✨ Features
 
-- **Compact, mobile-first UI**: three main buttons (`🌤 Today`, `📅 Tomorrow`, `⚙️ Settings`) and short, scannable messages.
-- **Per-day schedule**: set a different send time for each weekday, or switch individual days off, all from inside the chat.
-- **Commute analysis (`🚶 Route`)**: set a destination, weekdays, departure/return hours and transport mode (walk, bike, transit, car). The bot compares the weather at home and at the destination for the trip there, the day at the destination and the trip back. Cyclists get a raincoat recommendation instead of an umbrella, plus a lower wind threshold.
-- **Smart location**: search by city, district or address (Open-Meteo geocoding with a Nominatim fallback) or send a Telegram location pin. The IANA timezone is detected automatically.
+- **Today & tomorrow forecasts (`🌤 Today`, `📅 Tomorrow`)**: three main buttons, morning/day/evening breakdown, and short, scannable cards.
+- **Morning delivery schedule**: set a different send time for each weekday, switch individual days off, or turn on a weekday/daily preset in one tap right after setting your city.
+- **Smart location**: search by city name via Open-Meteo geocoding or send a Telegram location pin (with Nominatim reverse geocoding). The IANA timezone is detected automatically.
 - **Personal thermal comfort**: an offset from `-5°C` to `+5°C`, tuned by the `🥶 Cold` / `👍 Ok` / `🥵 Warm` buttons under each forecast.
-- **Your wardrobe + AI stylist**: describe your clothes in free text and the LLM picks from them (for example, no suede in the rain).
-- **Free-text questions**: ask *"will I be cold in a windbreaker tonight?"* and get an answer grounded in the real forecast.
+- **Your wardrobe + AI stylist**: describe your clothes in free text and the LLM picks specific items from them (for example, no suede in the rain), plus handles free-text follow-up questions like *"will I be cold in a windbreaker tonight?"*.
 - **Private by design**: an optional `ALLOWED_USER_IDS` allow-list restricts who can use the bot.
 
 ---
@@ -29,9 +27,9 @@ flowchart LR
     SCHED["APScheduler (1-min tick, UTC to user TZ)"] -->|on schedule| BOT
     BOT <--> DB[("SQLite, WAL mode")]
     BOT --> METEO["Open-Meteo API (no key)"]
-    METEO --> ANALYZER["Deterministic analyzers (day slots, alerts, commute)"]
+    METEO --> ANALYZER["Deterministic weather analyzer (day slots, alerts)"]
     ANALYZER --> AI1["Primary LLM"]
-    AI1 -->|valid JSON| GUARD["Safety guardrails (umbrella / raincoat / UV / cold)"]
+    AI1 -->|valid JSON| GUARD["Safety guardrails (umbrella / UV / cold)"]
     AI1 -.->|429 / 5xx / timeout| AI2["Fallback LLM (optional)"]
     AI2 -->|valid JSON| GUARD
     AI2 -.->|all providers down or no keys| RULES["Rule-based advisor"]
@@ -46,8 +44,8 @@ flowchart LR
 | Task | Approach | Why |
 | --- | --- | --- |
 | Timezones, scheduling, no duplicate sends | Plain code + SQLite | Must be exact and idempotent (`PRIMARY KEY` in `delivery_logs`). |
-| Aggregating hourly weather, rain windows, wind, temperature swings, commute legs | Deterministic Python | LLMs should not do arithmetic or compare numbers. |
-| Hard safety rules (umbrella / raincoat, UV, gloves in frost) | Deterministic guardrails | Even if the LLM forgets, `_enforce_safety_invariants` adds the item back. |
+| Aggregating hourly weather, rain windows, wind, temperature swings | Deterministic Python | LLMs should not do arithmetic or compare numbers. |
+| Hard safety rules (umbrella, UV, gloves in frost) | Deterministic guardrails | Even if the LLM forgets, `_enforce_safety_invariants` adds the item back. |
 | Understanding a free-text wardrobe and choosing suitable items | LLM (JSON output) | Free text and material awareness are impractical to hand-code. |
 | Answering free-form questions about the day | LLM | Natural-language answers on top of exact data. |
 | Resilience | `Primary LLM → Fallback LLM → rule-based advisor` | The daily message is always delivered, even without any API key. |
@@ -160,7 +158,7 @@ uv run ruff check src tests
 uv run pytest -v
 ```
 
-The test suite uses mocked HTTP (`httpx.MockTransport`) and covers the weather and commute analyzers, rule-based advice, LLM parsing, guardrails and failover, the SQLite repository, timezone-aware scheduling and HTML escaping.
+The test suite uses mocked HTTP (`httpx.MockTransport`) and covers the weather analyzer, rule-based advice, LLM parsing, guardrails and failover, the SQLite repository, timezone-aware scheduling and HTML escaping.
 
 ---
 
@@ -177,11 +175,10 @@ The test suite uses mocked HTTP (`httpx.MockTransport`) and covers the weather a
 │   ├── config.py                      # pydantic settings, LLM provider chain
 │   ├── models.py                      # domain models
 │   ├── main.py                        # entry point, wiring, polling loop
-│   ├── db/repository.py               # async SQLite (users, schedules, routes, deliveries)
+│   ├── db/repository.py               # async SQLite (users, schedules, deliveries)
 │   ├── services/
-│   │   ├── open_meteo.py              # weather, geocoding, Nominatim fallback
+│   │   ├── open_meteo.py              # weather, geocoding, reverse geocoding
 │   │   ├── weather_analyzer.py        # day slots and deterministic alerts
-│   │   ├── route_analyzer.py          # commute analysis (there / at destination / back)
 │   │   ├── rule_advisor.py            # standalone rule-based outfit advisor
 │   │   ├── ai_advisor.py              # LLM advisor, guardrails, failover, Q&A
 │   │   ├── formatter.py               # compact HTML messages

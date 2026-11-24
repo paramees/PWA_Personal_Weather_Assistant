@@ -8,17 +8,11 @@ from aiogram.types import (
 )
 
 from weather_wardrobe.models import (
-    CommuteRoute,
     DaySchedule,
     LocationCandidate,
-    TransportMode,
     UserProfile,
 )
-from weather_wardrobe.services.formatter import (
-    TRANSPORT_EMOJI,
-    TRANSPORT_LABELS,
-    WEEKDAY_SHORT,
-)
+from weather_wardrobe.services.formatter import WEEKDAY_SHORT
 
 PRESET_TIMES = ("06:30", "07:00", "07:30", "08:00", "09:00", "10:00")
 COMFORT_OPTIONS = (
@@ -34,13 +28,6 @@ ACTIVE_HOURS_PRESETS = (
     (9, 22),
     (10, 23),
 )
-ROUTE_HOURS_PRESETS = (
-    (8, 18),
-    (9, 18),
-    (9, 19),
-    (7, 16),
-)
-TRANSPORT_MODES: tuple[TransportMode, ...] = ("walk", "bike", "transit", "car")
 
 
 def main_reply_kb() -> ReplyKeyboardMarkup:
@@ -97,6 +84,20 @@ def forecast_inline_kb(is_tomorrow: bool) -> InlineKeyboardMarkup:
     )
 
 
+def onboarding_schedule_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⚡ Будни 07:30", callback_data="sch:preset:wd0730"),
+                InlineKeyboardButton(text="⚡ Все дни 08:00", callback_data="sch:preset:all0800"),
+            ],
+            [
+                InlineKeyboardButton(text="🗓 Настроить по дням", callback_data="cfg:sched"),
+            ],
+        ]
+    )
+
+
 def settings_main_kb(
     user: UserProfile | None = None,
     llm_configured: bool = False,
@@ -106,13 +107,10 @@ def settings_main_kb(
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="📍 Город", callback_data="cfg:city"),
-                InlineKeyboardButton(text="🗓 Расписание", callback_data="cfg:sched"),
+                InlineKeyboardButton(text="🗓 Рассылка", callback_data="cfg:sched"),
             ],
             [
-                InlineKeyboardButton(text="🚶 Маршрут", callback_data="cfg:route"),
                 InlineKeyboardButton(text="🧥 Гардероб", callback_data="cfg:wardrobe"),
-            ],
-            [
                 InlineKeyboardButton(text="🔧 Ещё настройки", callback_data="cfg:more"),
             ],
         ]
@@ -214,105 +212,6 @@ def schedule_day_kb(day: DaySchedule) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def route_main_kb(route: CommuteRoute) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    if route.has_destination:
-        toggle_text = "🔕 Выключить маршрут" if route.enabled else "✅ Включить маршрут"
-        rows.append([InlineKeyboardButton(text=toggle_text, callback_data="rt:toggle")])
-
-    rows.append(
-        [
-            InlineKeyboardButton(text="📍 Точка Б", callback_data="rt:dest"),
-            InlineKeyboardButton(text="🕒 Время дороги", callback_data="rt:hours"),
-        ]
-    )
-    rows.append(
-        [
-            InlineKeyboardButton(text="🚲 Способ", callback_data="rt:mode"),
-            InlineKeyboardButton(text="🗓 Дни маршрута", callback_data="rt:days"),
-        ]
-    )
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="cfg:main")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def route_transport_kb(current_mode: TransportMode) -> InlineKeyboardMarkup:
-    buttons: list[InlineKeyboardButton] = []
-    for mode in TRANSPORT_MODES:
-        mark = "✅ " if mode == current_mode else ""
-        label = f"{mark}{TRANSPORT_EMOJI[mode]} {TRANSPORT_LABELS[mode]}"
-        buttons.append(InlineKeyboardButton(text=label, callback_data=f"rt:setmode:{mode}"))
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            buttons[:2],
-            buttons[2:],
-            [InlineKeyboardButton(text="⬅️ К маршруту", callback_data="cfg:route")],
-        ]
-    )
-
-
-def route_hours_kb(depart_hour: int, return_hour: int) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    pair: list[InlineKeyboardButton] = []
-    for dep, ret in ROUTE_HOURS_PRESETS:
-        mark = "✅ " if (dep == depart_hour and ret == return_hour) else ""
-        pair.append(
-            InlineKeyboardButton(
-                text=f"{mark}{dep:02d}:00–{ret:02d}:00",
-                callback_data=f"rt:sethrs:{dep}:{ret}",
-            )
-        )
-        if len(pair) == 2:
-            rows.append(pair)
-            pair = []
-    if pair:
-        rows.append(pair)
-    rows.append([InlineKeyboardButton(text="🕒 Свой интервал", callback_data="rt:hrs_custom")])
-    rows.append([InlineKeyboardButton(text="⬅️ К маршруту", callback_data="cfg:route")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def route_days_kb(weekdays: list[int]) -> InlineKeyboardMarkup:
-    selected = set(weekdays)
-    row1 = [
-        InlineKeyboardButton(
-            text=f"{'✅' if d in selected else '⚪'} {WEEKDAY_SHORT[d]}",
-            callback_data=f"rt:day:{d}",
-        )
-        for d in range(4)
-    ]
-    row2 = [
-        InlineKeyboardButton(
-            text=f"{'✅' if d in selected else '⚪'} {WEEKDAY_SHORT[d]}",
-            callback_data=f"rt:day:{d}",
-        )
-        for d in range(4, 7)
-    ]
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            row1,
-            row2,
-            [InlineKeyboardButton(text="⚡ Только Пн–Пт", callback_data="rt:days_wd")],
-            [InlineKeyboardButton(text="⬅️ К маршруту", callback_data="cfg:route")],
-        ]
-    )
-
-
-def route_dest_candidates_kb(candidates: list[LocationCandidate]) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    for idx, candidate in enumerate(candidates):
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"📍 {candidate.display_name}",
-                    callback_data=f"rt:pick:{idx}",
-                )
-            ]
-        )
-    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="rt:cancel")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
 def comfort_kb(current_offset: int) -> InlineKeyboardMarkup:
     row: list[InlineKeyboardButton] = []
     for val, label in COMFORT_OPTIONS:
@@ -368,6 +267,9 @@ def wardrobe_kb(has_wardrobe: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="✏️ Изменить гардероб", callback_data="wrd:edit")],
     ]
     if has_wardrobe:
+        rows.append(
+            [InlineKeyboardButton(text="🌤 Проверить совет на сегодня", callback_data="fc:today")]
+        )
         rows.append([InlineKeyboardButton(text="🗑 Очистить", callback_data="wrd:clear")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="cfg:main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

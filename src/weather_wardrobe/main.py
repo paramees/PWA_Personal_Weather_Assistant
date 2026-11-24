@@ -26,7 +26,8 @@ async def _configure_commands(bot: Bot) -> None:
     desired = [
         BotCommand(command="today", description="Погода и одежда на сегодня"),
         BotCommand(command="tomorrow", description="Погода и одежда на завтра"),
-        BotCommand(command="settings", description="Город, расписание, маршрут"),
+        BotCommand(command="wardrobe", description="Мой гардероб для советов"),
+        BotCommand(command="settings", description="Город, рассылка и гардероб"),
         BotCommand(command="help", description="Справка"),
     ]
     try:

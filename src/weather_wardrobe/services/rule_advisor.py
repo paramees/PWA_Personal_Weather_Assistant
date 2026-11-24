@@ -1,24 +1,28 @@
 from __future__ import annotations
 
-from weather_wardrobe.models import CommuteSummary, DayWeatherSummary, OutfitAdvice, UserProfile
+from weather_wardrobe.models import DayWeatherSummary, OutfitAdvice, UserProfile
+
+
+def _fmt_temp(value: float) -> str:
+    rounded = int(round(value))
+    if rounded > 0:
+        return f"+{rounded}°"
+    return f"{rounded}°"
 
 
 class RuleBasedAdvisor:
-    """Zero-dependency deterministic outfit advisor based on apparent temp, alerts, and commute."""
+    """Zero-dependency deterministic outfit advisor based on apparent temp and weather alerts."""
 
     def advise(
         self,
         summary: DayWeatherSummary,
         user: UserProfile,
-        commute: CommuteSummary | None = None,
     ) -> OutfitAdvice:
         eff_avg = summary.feels_avg + user.comfort_offset
         eff_min = summary.feels_min + user.comfort_offset
         alerts = summary.alerts
-        commute_rain = bool(commute and (commute.rain_on_way_there or commute.rain_on_way_back))
-        any_rain = alerts.umbrella_required or commute_rain
-        is_bike = bool(commute and commute.transport_mode == "bike")
-        any_wind = alerts.strong_wind or bool(commute and commute.wind_warning)
+        any_rain = alerts.umbrella_required
+        any_wind = alerts.strong_wind
 
         if eff_avg <= -10:
             headline = "Морозно — утепляйся по максимуму"
@@ -70,13 +74,8 @@ class RuleBasedAdvisor:
         accessories: list[str] = []
 
         if any_rain:
-            if is_bike:
-                accessories.append("🧥 Дождевик или мембранная куртка")
-            elif alerts.umbrella_required:
-                rain_label = f" (дождь {alerts.rain_window})" if alerts.rain_window else ""
-                accessories.append(f"☂️ Зонт{rain_label}")
-            else:
-                accessories.append("☂️ Зонт (дождь в дороге)")
+            rain_label = f" (дождь {alerts.rain_window})" if alerts.rain_window else ""
+            accessories.append(f"☂️ Зонт{rain_label}")
 
             if eff_avg > 23:
                 footwear = "Лёгкие непромокаемые кроссовки (без замши и ткани)"
@@ -109,21 +108,14 @@ class RuleBasedAdvisor:
         if alerts.high_uv:
             accessories.append("🕶 Солнцезащитные очки и SPF-крем")
 
-        if commute and commute.rain_on_way_back and not commute.rain_on_way_there:
+        if alerts.big_temp_swing:
+            m_feels = _fmt_temp(summary.morning.apparent_temp)
+            d_feels = _fmt_temp(summary.day.apparent_temp)
+            e_feels = _fmt_temp(summary.evening.apparent_temp)
             pro_tip = (
-                f"Утром сухо, но к {commute.way_back.hour:02d}:00 по дороге обратно пойдёт дождь."
-            )
-        elif is_bike and commute and commute.wind_warning:
-            pro_tip = (
-                f"На велосипеде ощущается встречный ветер до {commute.way_there.wind_speed_ms:.0f}"
-                " м/с — бери непродуваемую куртку и перчатки."
-            )
-        elif commute and commute.transport_mode == "transit" and summary.feels_min <= 8:
-            pro_tip = "Одевайся слоями, чтобы в тёплом транспорте было легко расстегнуться."
-        elif alerts.big_temp_swing:
-            pro_tip = (
-                f"Перепад за день {alerts.temp_swing_delta:g}°C — "
-                "одевайся слоями, чтобы не мёрзнуть утром и не жариться днём."
+                f"Перепад за день {alerts.temp_swing_delta:g}°C "
+                f"(ощущ. утро {m_feels}, день {d_feels}, вечер {e_feels}) — "
+                "одевайся слоями."
             )
         elif alerts.umbrella_required and alerts.rain_window:
             pro_tip = f"Дождь около {alerts.rain_window} — не забудь зонт перед выходом."

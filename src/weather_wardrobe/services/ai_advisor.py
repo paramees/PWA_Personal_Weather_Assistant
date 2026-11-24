@@ -9,24 +9,23 @@ import httpx
 from pydantic import ValidationError
 
 from weather_wardrobe.config import LLMProviderConfig, Settings
-from weather_wardrobe.models import CommuteSummary, DayWeatherSummary, OutfitAdvice, UserProfile
+from weather_wardrobe.models import DayWeatherSummary, OutfitAdvice, UserProfile
 from weather_wardrobe.services.rule_advisor import RuleBasedAdvisor
 
 logger = logging.getLogger(__name__)
 
 OUTFIT_SYSTEM_PROMPT = """Ты — практичный стилист и погодный ассистент в Telegram.
-На основе метеоданных, маршрута (если указан) и гардероба пользователя дай КОРОТКИЙ и чёткий совет
+На основе метеоданных и гардероба пользователя дай КОРОТКИЙ и чёткий совет
 по одежде на русском языке (чтобы сообщение легко читалось на телефоне за 5 секунд).
 
 Правила:
 1. Пиши коротко: каждое поле (top, outerwear, bottom, footwear) — по 4–9 слов, без воды.
-2. Если указан гардероб (wardrobe_text), выбирай реальные вещи пользователя и отсекай
-   неподходящие материалы (не советуй замшу, белую ткань или сетку в дождь/снег).
-3. Учитывай thermal_comfort_offset (отрицательное — быстрее мёрзнет, положительное — жарче).
-4. Если указан commute (маршрут Дом ↔ Точка Б):
-   - Учитывай погоду утром в дорогу и вечером обратно (например, дождь к возвращению).
-   - Если transport_mode == "bike": при дожде советуй дождевик/мембрану, НЕ зонт!
-5. Отвечай СТРОГО валидным JSON без markdown-обрамления:
+2. Если указан гардероб (wardrobe_text), обязательно выбирай конкретные вещи пользователя
+   по названиям (его куртку, пальто, кофту, обувь) и отсекай неподходящие материалы
+   (не советуй замшу, белую ткань или сетчатые кроссовки в дождь, слякоть или снег).
+3. Учитывай разницу между утром, днём и вечером (slots.morning / day / evening), ветер,
+   осадки и thermal_comfort_offset_c (отрицательное — быстрее мёрзнет, положительное — жарче).
+4. Отвечай СТРОГО валидным JSON без markdown-обрамления:
 {
   "headline": "краткая суть дня (до 50 символов)",
   "top": "базовый и средний слой (коротко)",
@@ -39,7 +38,8 @@ OUTFIT_SYSTEM_PROMPT = """Ты — практичный стилист и пог
 
 QA_SYSTEM_PROMPT = """Ты — практичный погодный ассистент в Telegram.
 Отвечай кратко, по делу и на русском языке (2-4 предложения максимум),
-опираясь строго на переданный прогноз погоды, маршрут и гардероб пользователя.
+опираясь строго на переданный прогноз (утро/день/вечер, ветер, осадки) и гардероб пользователя.
+Если пользователь спрашивает про конкретную вещь из шкафа, оцени её по материалу, теплу и погоде.
 Не выдумывай метеоданные, которых нет в контексте."""
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
@@ -53,7 +53,6 @@ def _build_weather_context(
     summary: DayWeatherSummary,
     user: UserProfile,
     recent_feedback: list[dict[str, Any]] | None = None,
-    commute: CommuteSummary | None = None,
 ) -> dict[str, Any]:
     return {
         "city": summary.city_name,
@@ -79,7 +78,6 @@ def _build_weather_context(
             "avg_humidity_pct": summary.avg_humidity,
         },
         "alerts": summary.alerts.model_dump(),
-        "commute": commute.model_dump() if commute is not None else None,
         "user_profile": {
             "thermal_comfort_offset_c": user.comfort_offset,
             "wardrobe_text": user.wardrobe_text or "Не указан (подбери универсальные базовые вещи)",
@@ -91,33 +89,19 @@ def _build_weather_context(
 def _enforce_safety_invariants(
     advice: OutfitAdvice,
     summary: DayWeatherSummary,
-    commute: CommuteSummary | None = None,
 ) -> OutfitAdvice:
     """Deterministic post-check ensuring critical safety accessories are never dropped by LLM."""
     accessories = list(advice.accessories)
     joined = " ".join(accessories).lower()
 
-    commute_rain = bool(commute and (commute.rain_on_way_there or commute.rain_on_way_back))
-    any_rain = summary.alerts.umbrella_required or commute_rain
-    is_bike = bool(commute and commute.transport_mode == "bike")
-
-    if any_rain:
-        if is_bike:
-            full_rain_text = f"{advice.outerwear} {joined}".lower()
-            if not any(
-                tok in full_rain_text
-                for tok in ("дождевик", "мембран", "непромокаем", "влагозащит")
-            ):
-                accessories.insert(0, "🧥 Дождевик / непромокаемая куртка")
-                joined = " ".join(accessories).lower()
-        elif "зонт" not in joined:
-            rain_note = (
-                f"☂️ Зонт (дождь {summary.alerts.rain_window})"
-                if summary.alerts.rain_window
-                else "☂️ Зонт"
-            )
-            accessories.insert(0, rain_note)
-            joined = " ".join(accessories).lower()
+    if summary.alerts.umbrella_required and "зонт" not in joined:
+        rain_note = (
+            f"☂️ Зонт (дождь {summary.alerts.rain_window})"
+            if summary.alerts.rain_window
+            else "☂️ Зонт"
+        )
+        accessories.insert(0, rain_note)
+        joined = " ".join(accessories).lower()
 
     if summary.alerts.high_uv and not any(
         token in joined for token in ("очк", "spf", "солнц", "крем")
@@ -203,15 +187,14 @@ class HybridOutfitAdvisor:
         summary: DayWeatherSummary,
         user: UserProfile,
         recent_feedback: list[dict[str, Any]] | None = None,
-        commute: CommuteSummary | None = None,
     ) -> OutfitAdvice:
-        baseline = self.rule_advisor.advise(summary, user, commute=commute)
+        baseline = self.rule_advisor.advise(summary, user)
         providers = self.settings.llm_providers
         if not providers or not user.use_ai:
             return baseline
 
         context_json = json.dumps(
-            _build_weather_context(summary, user, recent_feedback, commute=commute),
+            _build_weather_context(summary, user, recent_feedback),
             ensure_ascii=False,
         )
         messages = [
@@ -229,7 +212,7 @@ class HybridOutfitAdvisor:
                     max_tokens=550,
                 )
                 advice = self._parse_outfit_json(raw_content, provider.model)
-                return _enforce_safety_invariants(advice, summary, commute=commute)
+                return _enforce_safety_invariants(advice, summary)
             except (
                 httpx.HTTPError,
                 TimeoutError,
@@ -252,7 +235,6 @@ class HybridOutfitAdvisor:
         question: str,
         summary: DayWeatherSummary,
         user: UserProfile,
-        commute: CommuteSummary | None = None,
     ) -> str | None:
         """Answer a free-text weather/outfit follow-up question using today's forecast."""
         providers = self.settings.llm_providers
@@ -260,7 +242,7 @@ class HybridOutfitAdvisor:
             return None
 
         context_json = json.dumps(
-            _build_weather_context(summary, user, commute=commute),
+            _build_weather_context(summary, user),
             ensure_ascii=False,
         )
         messages = [

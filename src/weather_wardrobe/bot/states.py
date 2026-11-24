@@ -8,5 +8,3 @@ class BotStates(StatesGroup):
     waiting_custom_time = State()
     waiting_active_hours = State()
     waiting_wardrobe = State()
-    waiting_route_dest = State()
-    waiting_route_hours = State()
