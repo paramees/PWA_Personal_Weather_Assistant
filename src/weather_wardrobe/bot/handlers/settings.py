@@ -18,20 +18,31 @@ from weather_wardrobe.bot.keyboards import (
     comfort_kb,
     location_request_kb,
     main_reply_kb,
+    route_days_kb,
+    route_dest_candidates_kb,
+    route_hours_kb,
+    route_main_kb,
+    route_transport_kb,
     schedule_day_kb,
     schedule_list_kb,
+    settings_advanced_kb,
     settings_main_kb,
     wardrobe_kb,
 )
 from weather_wardrobe.bot.states import BotStates
 from weather_wardrobe.config import Settings
 from weather_wardrobe.db.repository import Repository
-from weather_wardrobe.models import LocationCandidate
+from weather_wardrobe.models import LocationCandidate, TransportMode
 from weather_wardrobe.services.formatter import (
+    TRANSPORT_EMOJI,
+    TRANSPORT_LABELS,
     WEEKDAY_FULL,
+    format_advanced_settings_summary,
     format_comfort_label,
+    format_route_summary,
     format_schedule_brief,
     format_settings_summary,
+    format_weekdays_brief,
 )
 from weather_wardrobe.services.open_meteo import OpenMeteoClient
 
@@ -62,13 +73,30 @@ async def _build_settings_view(
 ) -> tuple[str, InlineKeyboardMarkup]:
     user = await repo.get_or_create_user(user_id)
     schedules = await repo.get_schedules(user_id)
+    route = await repo.get_route(user_id)
     text = format_settings_summary(
         user=user,
         schedules=schedules,
+        route=route,
         llm_configured=settings.llm_configured,
         llm_model=settings.llm_display_label,
     )
     kb = settings_main_kb(user, settings.llm_configured)
+    return text, kb
+
+
+async def _build_advanced_view(
+    repo: Repository,
+    settings: Settings,
+    user_id: int,
+) -> tuple[str, InlineKeyboardMarkup]:
+    user = await repo.get_or_create_user(user_id)
+    text = format_advanced_settings_summary(
+        user=user,
+        llm_configured=settings.llm_configured,
+        llm_model=settings.llm_display_label,
+    )
+    kb = settings_advanced_kb(user, settings.llm_configured)
     return text, kb
 
 
@@ -131,6 +159,19 @@ async def cmd_wardrobe(
     )
 
 
+@router.message(Command("route"), StateFilter("*"))
+async def cmd_route(
+    message: Message,
+    state: FSMContext,
+    repo: Repository,
+) -> None:
+    if message.from_user is None:
+        return
+    await state.clear()
+    route = await repo.get_route(message.from_user.id)
+    await message.answer(format_route_summary(route), reply_markup=route_main_kb(route))
+
+
 @router.callback_query(F.data == "cfg:main")
 async def cb_settings_main(
     callback: CallbackQuery,
@@ -143,6 +184,294 @@ async def cb_settings_main(
     text, kb = await _build_settings_view(repo, settings, callback.from_user.id)
     await _safe_edit(callback.message, text, kb)
     await callback.answer()
+
+
+@router.callback_query(F.data == "cfg:more")
+async def cb_settings_more(
+    callback: CallbackQuery,
+    repo: Repository,
+    settings: Settings,
+) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+    text, kb = await _build_advanced_view(repo, settings, callback.from_user.id)
+    await _safe_edit(callback.message, text, kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cfg:route")
+async def cb_settings_route(callback: CallbackQuery, repo: Repository) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+    route = await repo.get_route(callback.from_user.id)
+    await _safe_edit(callback.message, format_route_summary(route), route_main_kb(route))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "rt:toggle")
+async def cb_route_toggle(callback: CallbackQuery, repo: Repository) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+    route = await repo.get_route(callback.from_user.id)
+    new_state = not route.enabled
+    await repo.set_route_enabled(callback.from_user.id, new_state)
+    updated = await repo.get_route(callback.from_user.id)
+    await _safe_edit(callback.message, format_route_summary(updated), route_main_kb(updated))
+    await callback.answer("Маршрут включён ✅" if new_state else "Маршрут на паузе ⚪")
+
+
+@router.callback_query(F.data == "rt:dest")
+async def cb_route_dest(callback: CallbackQuery, state: FSMContext) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+    await state.set_state(BotStates.waiting_route_dest)
+    await callback.message.answer(
+        "📍 Напиши город, район или адрес Точки Б (например: <i>Минск</i> или "
+        "<i>Berlin Mitte</i>) либо отправь геолокацию кнопкой:",
+        reply_markup=location_request_kb(),
+    )
+    await callback.answer()
+
+
+@router.message(BotStates.waiting_route_dest, F.text)
+async def handle_route_dest_text(
+    message: Message,
+    state: FSMContext,
+    weather_client: OpenMeteoClient,
+) -> None:
+    if not message.text:
+        return
+    try:
+        candidates = await weather_client.search_places(message.text, count=5)
+    except HTTPError:
+        await message.answer("Ошибка поиска места. Попробуй ещё раз через минуту.")
+        return
+
+    if not candidates:
+        await message.answer(
+            "Не нашёл такое место 😔 Попробуй указать город/район точнее или отправь геолокацию."
+        )
+        return
+
+    await state.update_data(route_candidates=[c.model_dump() for c in candidates])
+    await message.answer(
+        "Выбери Точку Б:",
+        reply_markup=route_dest_candidates_kb(candidates),
+    )
+
+
+@router.callback_query(F.data.startswith("rt:pick:"))
+async def cb_route_pick(
+    callback: CallbackQuery,
+    state: FSMContext,
+    repo: Repository,
+    weather_client: OpenMeteoClient,
+) -> None:
+    if not isinstance(callback.message, Message) or not callback.data:
+        await callback.answer()
+        return
+    data = await state.get_data()
+    raw_candidates = data.get("route_candidates") or []
+    idx = int(callback.data.split(":")[2])
+    if idx < 0 or idx >= len(raw_candidates):
+        await callback.answer("Список устарел, введи место заново.", show_alert=True)
+        await state.clear()
+        return
+
+    chosen = LocationCandidate.model_validate(raw_candidates[idx])
+    tz_name = chosen.timezone
+    if not tz_name:
+        try:
+            tz_name, _ = await weather_client.fetch_forecast(
+                chosen.latitude,
+                chosen.longitude,
+                days=1,
+            )
+        except HTTPError:
+            tz_name = "UTC"
+
+    await repo.upsert_route_destination(
+        callback.from_user.id,
+        chosen.display_name,
+        chosen.latitude,
+        chosen.longitude,
+        tz_name,
+    )
+    await state.clear()
+    route = await repo.get_route(callback.from_user.id)
+    await _safe_edit(
+        callback.message,
+        f"✅ Точка Б сохранена: <b>{html.escape(chosen.display_name)}</b>.",
+    )
+    await callback.message.answer(
+        format_route_summary(route),
+        reply_markup=route_main_kb(route),
+    )
+    await callback.message.answer("Меню готово 👇", reply_markup=main_reply_kb())
+    await callback.answer("Точка Б сохранена 📍")
+
+
+@router.callback_query(F.data == "rt:cancel")
+async def cb_route_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if isinstance(callback.message, Message):
+        await _safe_edit(callback.message, "Выбор Точки Б отменён.")
+        await callback.message.answer("Главное меню:", reply_markup=main_reply_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "rt:mode")
+async def cb_route_mode(callback: CallbackQuery, repo: Repository) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+    route = await repo.get_route(callback.from_user.id)
+    await _safe_edit(
+        callback.message,
+        "🚲 <b>Как добираешься по маршруту?</b>\n\n"
+        "Это влияет на учёт ветра и выбор между зонтом и дождевиком.",
+        route_transport_kb(route.transport_mode),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rt:setmode:"))
+async def cb_route_set_mode(callback: CallbackQuery, repo: Repository) -> None:
+    if not isinstance(callback.message, Message) or not callback.data:
+        await callback.answer()
+        return
+    mode_raw = callback.data.split(":")[2]
+    if mode_raw not in ("walk", "bike", "transit", "car"):
+        await callback.answer()
+        return
+    mode: TransportMode = mode_raw  # type: ignore[assignment]
+    await repo.update_route_transport(callback.from_user.id, mode)
+    route = await repo.get_route(callback.from_user.id)
+    await _safe_edit(callback.message, format_route_summary(route), route_main_kb(route))
+    await callback.answer(f"{TRANSPORT_EMOJI[mode]} {TRANSPORT_LABELS[mode]}")
+
+
+@router.callback_query(F.data == "rt:hours")
+async def cb_route_hours(callback: CallbackQuery, repo: Repository) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+    route = await repo.get_route(callback.from_user.id)
+    await _safe_edit(
+        callback.message,
+        "🕒 <b>Время дороги (Туда — Обратно)</b>\n\n"
+        f"Сейчас: <b>{route.depart_hour:02d}:00–{route.return_hour:02d}:00</b>",
+        route_hours_kb(route.depart_hour, route.return_hour),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rt:sethrs:"))
+async def cb_route_set_hours(callback: CallbackQuery, repo: Repository) -> None:
+    if not isinstance(callback.message, Message) or not callback.data:
+        await callback.answer()
+        return
+    _, _, dep_str, ret_str = callback.data.split(":")
+    dep_h, ret_h = int(dep_str), int(ret_str)
+    await repo.update_route_hours(callback.from_user.id, dep_h, ret_h)
+    route = await repo.get_route(callback.from_user.id)
+    await _safe_edit(callback.message, format_route_summary(route), route_main_kb(route))
+    await callback.answer(f"{dep_h:02d}:00–{ret_h:02d}:00 ✅")
+
+
+@router.callback_query(F.data == "rt:hrs_custom")
+async def cb_route_hours_custom(callback: CallbackQuery, state: FSMContext) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+    await state.set_state(BotStates.waiting_route_hours)
+    await callback.message.answer(
+        "🕒 Введи час выхода из дома и час возвращения через дефис "
+        "(например: <code>8-18</code> или <code>9-20</code>):",
+        reply_markup=cancel_reply_kb(),
+    )
+    await callback.answer()
+
+
+@router.message(BotStates.waiting_route_hours, F.text)
+async def handle_route_hours_input(
+    message: Message,
+    state: FSMContext,
+    repo: Repository,
+) -> None:
+    if message.from_user is None or not message.text:
+        return
+    match = _HOURS_RE.fullmatch(message.text)
+    if not match:
+        await message.answer("Пример формата: <code>8-18</code> или <code>9-19</code>.")
+        return
+    dep_h, ret_h = int(match.group(1)), int(match.group(2))
+    if not (0 <= dep_h < ret_h <= 23):
+        await message.answer(
+            "Час выхода должен быть меньше часа возвращения "
+            "(от 0 до 23, например <code>8-18</code>)."
+        )
+        return
+
+    await repo.update_route_hours(message.from_user.id, dep_h, ret_h)
+    await state.clear()
+    route = await repo.get_route(message.from_user.id)
+    await message.answer(
+        f"✅ Время маршрута: <b>{dep_h:02d}:00 → {ret_h:02d}:00</b>.",
+        reply_markup=main_reply_kb(),
+    )
+    await message.answer(format_route_summary(route), reply_markup=route_main_kb(route))
+
+
+@router.callback_query(F.data == "rt:days")
+async def cb_route_days(callback: CallbackQuery, repo: Repository) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+    route = await repo.get_route(callback.from_user.id)
+    await _safe_edit(
+        callback.message,
+        "🗓 <b>Дни маршрута</b>\n\n"
+        f"Активные дни: <b>{html.escape(format_weekdays_brief(route.weekdays))}</b>",
+        route_days_kb(route.weekdays),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rt:day:"))
+async def cb_route_day_toggle(callback: CallbackQuery, repo: Repository) -> None:
+    if not isinstance(callback.message, Message) or not callback.data:
+        await callback.answer()
+        return
+    weekday = int(callback.data.split(":")[2])
+    days = await repo.toggle_route_weekday(callback.from_user.id, weekday)
+    await _safe_edit(
+        callback.message,
+        "🗓 <b>Дни маршрута</b>\n\n"
+        f"Активные дни: <b>{html.escape(format_weekdays_brief(days))}</b>",
+        route_days_kb(days),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "rt:days_wd")
+async def cb_route_days_weekdays(callback: CallbackQuery, repo: Repository) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+    days = [0, 1, 2, 3, 4]
+    await repo.set_route_weekdays(callback.from_user.id, days)
+    await _safe_edit(
+        callback.message,
+        "🗓 <b>Дни маршрута</b>\n\n"
+        f"Активные дни: <b>{html.escape(format_weekdays_brief(days))}</b>",
+        route_days_kb(days),
+    )
+    await callback.answer("Пн–Пт ✅")
 
 
 @router.callback_query(F.data == "cfg:sched")
@@ -344,12 +673,12 @@ async def handle_location_pin(
     state: FSMContext,
     repo: Repository,
     weather_client: OpenMeteoClient,
-    settings: Settings,
 ) -> None:
     if message.from_user is None or message.location is None:
         return
     lat = message.location.latitude
     lon = message.location.longitude
+    current_state = await state.get_state()
     await state.clear()
 
     city_name = await weather_client.reverse_geocode_city(lat, lon)
@@ -358,15 +687,22 @@ async def handle_location_pin(
     except HTTPError:
         tz_name = "UTC"
 
+    if current_state == BotStates.waiting_route_dest.state:
+        await repo.upsert_route_destination(message.from_user.id, city_name, lat, lon, tz_name)
+        route = await repo.get_route(message.from_user.id)
+        await message.answer(
+            f"📍 Точка Б сохранена: <b>{html.escape(city_name)}</b>.",
+            reply_markup=main_reply_kb(),
+        )
+        await message.answer(format_route_summary(route), reply_markup=route_main_kb(route))
+        return
+
     await repo.update_location(message.from_user.id, city_name, lat, lon, tz_name)
     await message.answer(
-        f"📍 Локация сохранена: <b>{html.escape(city_name)}</b> "
-        f"(часовой пояс <code>{html.escape(tz_name)}</code>).\n"
-        "Теперь можешь нажать <b>🌤 Сегодня</b> или настроить расписание!",
+        f"✅ Город сохранён: <b>{html.escape(city_name)}</b>.\n"
+        "Жми <b>🌤 Сегодня</b> за прогнозом или <b>⚙️ Настройки</b>.",
         reply_markup=main_reply_kb(),
     )
-    text, kb = await _build_settings_view(repo, settings, message.from_user.id)
-    await message.answer(text, reply_markup=kb)
 
 
 @router.message(BotStates.waiting_city, F.text)
@@ -404,7 +740,6 @@ async def cb_city_pick(
     callback: CallbackQuery,
     state: FSMContext,
     repo: Repository,
-    settings: Settings,
 ) -> None:
     if not isinstance(callback.message, Message) or not callback.data:
         await callback.answer()
@@ -428,15 +763,12 @@ async def cb_city_pick(
     await state.clear()
     await _safe_edit(
         callback.message,
-        f"✅ Город сохранён: <b>{html.escape(chosen.display_name)}</b> "
-        f"(<code>{html.escape(chosen.timezone)}</code>).",
+        f"✅ Город сохранён: <b>{html.escape(chosen.display_name)}</b>.",
     )
     await callback.message.answer(
-        "Теперь можно посмотреть прогноз кнопкой <b>🌤 Сегодня</b> или настроить утреннюю рассылку.",
+        "Жми <b>🌤 Сегодня</b> за прогнозом или <b>⚙️ Настройки</b>.",
         reply_markup=main_reply_kb(),
     )
-    text, kb = await _build_settings_view(repo, settings, callback.from_user.id)
-    await callback.message.answer(text, reply_markup=kb)
     await callback.answer("Город сохранён 📍")
 
 
@@ -654,6 +986,6 @@ async def cb_ai_toggle(
     user = await repo.get_or_create_user(callback.from_user.id)
     new_val = not user.use_ai
     await repo.set_use_ai(callback.from_user.id, new_val)
-    text, kb = await _build_settings_view(repo, settings, callback.from_user.id)
+    text, kb = await _build_advanced_view(repo, settings, callback.from_user.id)
     await _safe_edit(callback.message, text, kb)
     await callback.answer("ИИ-стилист включён 🤖" if new_val else "ИИ-стилист выключен 📐")

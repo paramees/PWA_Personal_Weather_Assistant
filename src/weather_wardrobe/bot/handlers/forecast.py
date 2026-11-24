@@ -20,6 +20,7 @@ from weather_wardrobe.db.repository import Repository
 from weather_wardrobe.services.ai_advisor import HybridOutfitAdvisor
 from weather_wardrobe.services.formatter import format_forecast_message
 from weather_wardrobe.services.open_meteo import OpenMeteoClient
+from weather_wardrobe.services.route_analyzer import compute_day_commute
 from weather_wardrobe.services.weather_analyzer import analyze_day
 
 logger = logging.getLogger(__name__)
@@ -64,9 +65,11 @@ async def _build_forecast_payload(
         active_start_hour=user.active_start_hour,
         active_end_hour=user.active_end_hour,
     )
+    route = await repo.get_route(user_id)
+    commute = await compute_day_commute(weather_client, user, route, points, target_date)
     recent_feedback = await repo.get_recent_feedback(user_id, limit=5)
-    advice = await advisor.advise(summary, user, recent_feedback)
-    text = format_forecast_message(summary, advice, is_tomorrow=is_tomorrow)
+    advice = await advisor.advise(summary, user, recent_feedback, commute=commute)
+    text = format_forecast_message(summary, advice, is_tomorrow=is_tomorrow, commute=commute)
     return text, "ok"
 
 
@@ -270,6 +273,8 @@ async def handle_free_text_qa(
             active_start_hour=user.active_start_hour,
             active_end_hour=user.active_end_hour,
         )
+        route = await repo.get_route(user.user_id)
+        commute = await compute_day_commute(weather_client, user, route, points, local_date)
     except (HTTPError, ValueError) as exc:
         logger.warning("Q&A forecast fetch failed: %s", exc)
         await message.answer(
@@ -278,7 +283,7 @@ async def handle_free_text_qa(
         )
         return
 
-    answer = await advisor.answer_question(question, summary, user)
+    answer = await advisor.answer_question(question, summary, user, commute=commute)
     if answer is None:
         await message.answer(
             "ИИ-сервис временно не отвечает 😔 Но ты всегда можешь открыть <b>🌤 Сегодня</b>.",

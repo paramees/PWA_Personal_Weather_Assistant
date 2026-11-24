@@ -135,3 +135,60 @@ class OutfitAdvice(BaseModel):
     pro_tip: str
     source: Literal["ai", "rules"] = "rules"
     model_name: str | None = None
+
+
+TransportMode = Literal["walk", "bike", "transit", "car"]
+
+
+class CommuteRoute(BaseModel):
+    """User's recurring Home -> Destination commute settings."""
+
+    enabled: bool = False
+    destination_name: str | None = None
+    dest_latitude: float | None = None
+    dest_longitude: float | None = None
+    dest_timezone: str | None = None
+    weekdays: list[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4])
+    depart_hour: int = Field(default=8, ge=0, le=23)
+    return_hour: int = Field(default=18, ge=0, le=23)
+    transport_mode: TransportMode = "walk"
+
+    @property
+    def has_destination(self) -> bool:
+        return self.dest_latitude is not None and self.dest_longitude is not None
+
+    def is_active_on(self, weekday: int) -> bool:
+        return self.enabled and self.has_destination and weekday in self.weekdays
+
+
+class CommuteLegSummary(BaseModel):
+    """Aggregated weather snapshot for one leg of the commute (there or back)."""
+
+    hour: int
+    temp: float
+    apparent_temp: float
+    wind_speed_ms: float
+    wind_gusts_ms: float
+    precip_prob: int
+    precipitation_mm: float
+    condition_emoji: str
+    condition_text: str
+    is_rain: bool
+
+
+class CommuteSummary(BaseModel):
+    """Full day commute weather comparison between origin and destination."""
+
+    origin_name: str
+    destination_name: str
+    transport_mode: TransportMode
+    way_there: CommuteLegSummary
+    at_destination_temp_min: float
+    at_destination_temp_max: float
+    at_destination_condition_emoji: str
+    at_destination_condition_text: str
+    way_back: CommuteLegSummary
+    rain_on_way_there: bool = False
+    rain_on_way_back: bool = False
+    wind_warning: bool = False
+    same_location: bool = False

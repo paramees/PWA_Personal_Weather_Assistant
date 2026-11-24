@@ -9,7 +9,6 @@ from aiogram.types import Message
 
 from weather_wardrobe.bot.keyboards import location_request_kb, main_reply_kb
 from weather_wardrobe.bot.states import BotStates
-from weather_wardrobe.config import Settings
 from weather_wardrobe.db.repository import Repository
 
 router = Router(name="start")
@@ -29,47 +28,30 @@ async def cmd_start(
     if not user.has_location:
         await state.set_state(BotStates.waiting_city)
         await message.answer(
-            "👋 <b>Привет! Я твой погодный гардеробщик.</b>\n\n"
-            "Каждое выбранное утро я проверяю прогноз, предупреждаю о дожде/ветре "
-            "и подсказываю, что именно надеть (в том числе из твоего реального гардероба).\n\n"
-            "Для начала укажи свой город — <b>напиши название</b> (например: <i>Берлин</i> "
-            "или <i>Москва</i>) либо нажми кнопку ниже и отправь геолокацию:",
+            "👋 <b>Привет! Я подскажу, как одеться по погоде.</b>\n\n"
+            "Напиши свой город (например: <i>Берлин</i>) или отправь геолокацию кнопкой ниже:",
             reply_markup=location_request_kb(),
         )
         return
 
     city = html.escape(user.city_name or "твой город")
     await message.answer(
-        f"👋 <b>С возвращением!</b>\n\n"
-        f"Текущий город: <b>{city}</b>.\n"
-        "Жми <b>🌤 Сегодня</b> для прогноза и подбора одежды или <b>⚙️ Настройки</b>, "
-        "чтобы настроить расписание по дням недели и свой гардероб.",
+        f"👋 <b>Привет!</b> Город: <b>{city}</b>.\n"
+        "Жми <b>🌤 Сегодня</b> за прогнозом или <b>⚙️ Настройки</b>, чтобы настроить "
+        "рассылку, маршрут и гардероб.",
         reply_markup=main_reply_kb(),
     )
 
 
 @router.message(Command("help"), StateFilter("*"))
-async def cmd_help(
-    message: Message,
-    state: FSMContext,
-    settings: Settings,
-) -> None:
+async def cmd_help(message: Message, state: FSMContext) -> None:
     await state.clear()
-    ai_note = (
-        "• <b>Свободный вопрос текстом</b> (например: <i>«пойду вечером пешком, "
-        "замерзну в ветровке?»</i>) — отвечу с учётом сегодняшней погоды и твоего гардероба."
-        if settings.llm_configured
-        else "• <i>ИИ-стилист сейчас не подключён (работают надёжные метео-правила). "
-        "Добавь LLM_API_KEY в .env для умного подбора из своего шкафа и ответов на вопросы.</i>"
-    )
     await message.answer(
-        "🧭 <b>Что я умею:</b>\n\n"
-        "• /today или <b>🌤 Сегодня</b> — прогноз по слотам, алерты и рекомендации по одежде.\n"
-        "• /tomorrow или <b>📅 Завтра</b> — то же самое на завтра.\n"
-        "• /settings или <b>⚙️ Настройки</b> — город, расписание на каждый день недели, "
-        "активные часы и уровень мерзлявости.\n"
-        "• /wardrobe или <b>🧥 Мой гардероб</b> — список твоих реальных курток и обуви.\n"
-        f"{ai_note}",
+        "🧭 <b>Короткая справка:</b>\n\n"
+        "• <b>🌤 Сегодня / 📅 Завтра</b> — погода и одежда\n"
+        "• <b>⚙️ Настройки</b> — город, расписание, маршрут и гардероб\n"
+        "• Любой вопрос текстом (например: <i>«в ветровке вечером не замёрзну?»</i>) "
+        "— отвечу по сегодняшней погоде",
         reply_markup=main_reply_kb(),
     )
 
@@ -78,4 +60,4 @@ async def cmd_help(
 @router.message(F.text == "❌ Отмена", StateFilter("*"))
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer("Действие отменено.", reply_markup=main_reply_kb())
+    await message.answer("Отменено.", reply_markup=main_reply_kb())

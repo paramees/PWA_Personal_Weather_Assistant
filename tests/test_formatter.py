@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import date
 
 from weather_wardrobe.models import (
+    CommuteLegSummary,
+    CommuteRoute,
+    CommuteSummary,
     DaySchedule,
     DayWeatherSummary,
     OutfitAdvice,
@@ -11,9 +14,12 @@ from weather_wardrobe.models import (
     WeatherAlerts,
 )
 from weather_wardrobe.services.formatter import (
+    format_advanced_settings_summary,
     format_forecast_message,
+    format_route_summary,
     format_schedule_brief,
     format_settings_summary,
+    format_weekdays_brief,
 )
 
 
@@ -30,7 +36,7 @@ def _sample_summary() -> DayWeatherSummary:
         precip_prob=80,
     )
     return DayWeatherSummary(
-        city_name="Berlin <Test & Co>",
+        city_name="Berlin <Test & Co>, Germany",
         target_date=date(2026, 11, 23),
         timezone="Europe/Berlin",
         active_start_hour=8,
@@ -60,36 +66,80 @@ def _sample_summary() -> DayWeatherSummary:
     )
 
 
-def test_format_forecast_escapes_html_and_renders_badges() -> None:
+def _sample_commute(mode: str = "bike") -> CommuteSummary:
+    leg = CommuteLegSummary(
+        hour=8,
+        temp=8.0,
+        apparent_temp=5.0,
+        wind_speed_ms=7.0,
+        wind_gusts_ms=10.0,
+        precip_prob=10,
+        precipitation_mm=0.0,
+        condition_emoji="⛅",
+        condition_text="Облачно",
+        is_rain=False,
+    )
+    return CommuteSummary(
+        origin_name="Дом",
+        destination_name="Офис <HQ>, Berlin",
+        transport_mode=mode,  # type: ignore[arg-type]
+        way_there=leg,
+        at_destination_temp_min=10.0,
+        at_destination_temp_max=13.0,
+        at_destination_condition_emoji="🌦",
+        at_destination_condition_text="Дождь",
+        way_back=leg.model_copy(
+            update={
+                "hour": 18,
+                "precip_prob": 75,
+                "is_rain": True,
+                "condition_emoji": "🌧",
+            }
+        ),
+        rain_on_way_there=False,
+        rain_on_way_back=True,
+        wind_warning=True,
+    )
+
+
+def test_format_forecast_compact_escapes_html_and_renders_commute() -> None:
     summary = _sample_summary()
-    ai_advice = OutfitAdvice(
-        headline="Свежо & ветрено <осторожно>",
+    advice = OutfitAdvice(
+        headline="Ветрено",
         top="Худи",
         outerwear="Ветровка",
         bottom="Джинсы",
         footwear="Кроссовки",
-        accessories=["☂️ Зонт (дождь 14:00–16:00)"],
-        pro_tip="Возьми зонт > не промокнешь.",
+        accessories=["🧥 Дождевик"],
+        pro_tip="Возьми дождевик > не промокнешь.",
         source="ai",
         model_name="llama-3.3-70b",
     )
 
-    msg = format_forecast_message(summary, ai_advice, is_tomorrow=False)
+    msg = format_forecast_message(
+        summary,
+        advice,
+        is_tomorrow=False,
+        commute=_sample_commute("bike"),
+    )
 
     assert "Berlin &lt;Test &amp; Co&gt;" in msg
-    assert "Свежо &amp; ветрено &lt;осторожно&gt;" in msg
-    assert "Возьми зонт &gt; не промокнешь." in msg
-    assert "ВОЗЬМИ ЗОНТ!" in msg
-    assert "Перепад температур 9°C" in msg
-    assert "Подобрано ИИ (llama-3.3-70b)" in msg
+    assert "Возьми дождевик &gt; не промокнешь." in msg
+    assert "бери дождевик/мембрану" in msg
+    assert "Перепад 9°C" in msg
+    assert "🌡 Утро" in msg
+    assert "Маршрут (Офис &lt;HQ&gt;, велосипед):" in msg
+    assert "• Туда (08:00):" in msg
+    assert "• Днём там: +10°…+13°" in msg
+    assert "• Обратно (18:00): +8° 🌧, дождь 75%" in msg
+    assert "Подобрано ИИ" not in msg
 
-    rules_advice = ai_advice.model_copy(update={"source": "rules", "model_name": None})
-    rules_msg = format_forecast_message(summary, rules_advice, is_tomorrow=True)
-    assert "Погода на завтра" in rules_msg
-    assert "Подобрано метео-алгоритмом" in rules_msg
+    tomorrow_msg = format_forecast_message(summary, advice, is_tomorrow=True)
+    assert "(завтра)" in tomorrow_msg
+    assert "ВОЗЬМИ ЗОНТ!" in tomorrow_msg
 
 
-def test_format_schedule_brief_groups_days() -> None:
+def test_format_schedule_and_weekdays_brief() -> None:
     all_off = [DaySchedule(weekday=i, enabled=False, send_time="08:00") for i in range(7)]
     assert format_schedule_brief(all_off) == "выключена"
 
@@ -103,9 +153,12 @@ def test_format_schedule_brief_groups_days() -> None:
         DaySchedule(weekday=6, enabled=False, send_time="08:00"),
     ]
     assert format_schedule_brief(mixed) == "Пн–Пт 07:30 · Сб 10:00"
+    assert format_weekdays_brief([0, 1, 2, 3, 4]) == "Пн–Пт"
+    assert format_weekdays_brief([0, 2, 4]) == "Пн, Ср, Пт"
+    assert format_weekdays_brief([]) == "не выбраны"
 
 
-def test_format_settings_summary_renders_safe_html() -> None:
+def test_format_settings_route_and_advanced_summaries() -> None:
     user = UserProfile(
         user_id=1,
         city_name="Москва",
@@ -117,7 +170,25 @@ def test_format_settings_summary_renders_safe_html() -> None:
         use_ai=True,
     )
     schedules = [DaySchedule(weekday=0, enabled=True, send_time="08:00")]
-    text = format_settings_summary(user, schedules, llm_configured=True, llm_model="gemini-4")
-    assert "Пальто &lt;шерсть&gt; &amp; кроссовки" in text
-    assert "-2°C (быстро мёрзну)" in text
-    assert "включён (gemini-4)" in text
+    route = CommuteRoute(
+        enabled=True,
+        destination_name="Офис",
+        dest_latitude=55.77,
+        dest_longitude=37.65,
+        weekdays=[0, 1, 2, 3, 4],
+        depart_hour=9,
+        return_hour=18,
+        transport_mode="transit",
+    )
+
+    main_text = format_settings_summary(user, schedules, route=route)
+    assert "Пальто &lt;шерсть&gt; &amp; кроссовки" in main_text
+    assert "Пн–Пт, 09:00–18:00, 🚌 → Офис" in main_text
+
+    adv_text = format_advanced_settings_summary(user, llm_configured=True, llm_model="llama-3.3")
+    assert "-2°C (быстро мёрзну)" in adv_text
+    assert "включён (llama-3.3)" in adv_text
+
+    route_text = format_route_summary(route)
+    assert "Включён ✅" in route_text
+    assert "🚌 транспорт" in route_text

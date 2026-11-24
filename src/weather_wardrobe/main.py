@@ -7,7 +7,7 @@ import httpx
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from aiogram.types import BotCommand
 
 from weather_wardrobe.bot.handlers import forecast, settings, start
@@ -24,11 +24,10 @@ logger = logging.getLogger(__name__)
 
 async def _configure_commands(bot: Bot) -> None:
     desired = [
-        BotCommand(command="today", description="Прогноз и одежда на сегодня"),
-        BotCommand(command="tomorrow", description="Прогноз и одежда на завтра"),
-        BotCommand(command="settings", description="Город, расписание и термокомфорт"),
-        BotCommand(command="wardrobe", description="Мой реальный гардероб"),
-        BotCommand(command="help", description="Справка по боту"),
+        BotCommand(command="today", description="Погода и одежда на сегодня"),
+        BotCommand(command="tomorrow", description="Погода и одежда на завтра"),
+        BotCommand(command="settings", description="Город, расписание, маршрут"),
+        BotCommand(command="help", description="Справка"),
     ]
     try:
         existing = await bot.get_my_commands()
@@ -51,6 +50,7 @@ async def run_bot() -> None:
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
         force=True,
     )
+    logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
 
     repo = Repository(app_settings.db_path)
     await repo.init()
@@ -89,7 +89,18 @@ async def run_bot() -> None:
             app_settings.llm_configured,
             app_settings.llm_display_label,
         )
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        while True:
+            try:
+                await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+                break
+            except TelegramRetryAfter as exc:
+                wait_sec = int(exc.retry_after) + 2
+                logger.warning(
+                    "Telegram flood limit on polling startup (%s). Sleeping %ss...",
+                    exc,
+                    wait_sec,
+                )
+                await asyncio.sleep(wait_sec)
     finally:
         scheduler.shutdown()
         await bot.session.close()

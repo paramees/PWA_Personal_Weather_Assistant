@@ -28,7 +28,7 @@ def _format_hour_ranges(hours: list[int]) -> str | None:
     return ", ".join(f"{s:02d}:00–{e + 1:02d}:00" for s, e in ranges)
 
 
-def _is_rain_hour(point: HourlyWeatherPoint) -> bool:
+def is_rain_hour(point: HourlyWeatherPoint) -> bool:
     return (
         point.rain_mm >= 0.3
         or (point.precipitation_mm >= 0.3 and point.snowfall_cm == 0 and point.temp > 0.5)
@@ -88,7 +88,7 @@ def analyze_day(
     max_uv = round(max(p.uv_index for p in window), 1)
     avg_humidity = round(sum(p.humidity for p in window) / len(window))
 
-    rain_hours = [p.time.hour for p in window if _is_rain_hour(p)]
+    rain_hours = [p.time.hour for p in window if is_rain_hour(p)]
     umbrella_required = len(rain_hours) > 0
     rain_window = _format_hour_ranges(rain_hours)
 

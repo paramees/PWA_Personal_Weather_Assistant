@@ -56,6 +56,7 @@ class OpenMeteoClient:
     GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
     FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
     NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse"
+    NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search"
 
     HOURLY_FIELDS = ",".join(
         [
@@ -104,6 +105,62 @@ class OpenMeteoClient:
                     latitude=float(item["latitude"]),
                     longitude=float(item["longitude"]),
                     timezone=item.get("timezone") or "UTC",
+                )
+            )
+        return candidates
+
+    async def search_places(self, query: str, count: int = 5) -> list[LocationCandidate]:
+        """Search cities via Open-Meteo, falling back to Nominatim for districts/addresses."""
+        cleaned = query.strip()
+        if not cleaned:
+            return []
+        cities = await self.search_cities(cleaned, count=count)
+        if cities:
+            return cities
+
+        try:
+            resp = await self.http.get(
+                self.NOMINATIM_SEARCH_URL,
+                params={
+                    "q": cleaned,
+                    "format": "json",
+                    "limit": count,
+                    "accept-language": "ru",
+                    "addressdetails": 1,
+                },
+                headers={"User-Agent": "WeatherWardrobeBot/1.0"},
+                timeout=4.0,
+            )
+            resp.raise_for_status()
+            items = resp.json()
+        except Exception:
+            return []
+
+        candidates: list[LocationCandidate] = []
+        for item in items:
+            address = item.get("address") or {}
+            short_name = (
+                item.get("name")
+                or address.get("suburb")
+                or address.get("city_district")
+                or address.get("city")
+                or cleaned
+            )
+            city_or_region = (
+                address.get("city")
+                or address.get("town")
+                or address.get("state")
+                or address.get("county")
+            )
+            country = address.get("country") or ""
+            candidates.append(
+                LocationCandidate(
+                    name=str(short_name),
+                    admin1=str(city_or_region) if city_or_region else None,
+                    country=str(country),
+                    latitude=float(item["lat"]),
+                    longitude=float(item["lon"]),
+                    timezone="",
                 )
             )
         return candidates

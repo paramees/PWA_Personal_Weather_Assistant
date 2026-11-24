@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date
 
 from weather_wardrobe.models import (
+    CommuteLegSummary,
+    CommuteSummary,
     DayWeatherSummary,
     SlotSummary,
     UserProfile,
@@ -117,3 +119,47 @@ def test_rain_and_high_uv_modifiers() -> None:
     assert any("очки" in item.lower() or "spf" in item.lower() for item in advice.accessories)
     assert "без замши" in advice.footwear.lower()
     assert "дождевик" in advice.outerwear.lower()
+
+
+def test_bike_commute_rain_recommends_raincoat_instead_of_umbrella() -> None:
+    advisor = RuleBasedAdvisor()
+    user = UserProfile(user_id=1)
+    summary = _make_summary(
+        feels_min=9,
+        feels_max=12,
+        feels_avg=10,
+        umbrella=True,
+        rain_window="18:00–19:00",
+    )
+    leg = CommuteLegSummary(
+        hour=8,
+        temp=10.0,
+        apparent_temp=9.0,
+        wind_speed_ms=7.5,
+        wind_gusts_ms=11.0,
+        precip_prob=10,
+        precipitation_mm=0.0,
+        condition_emoji="⛅",
+        condition_text="Облачно",
+        is_rain=False,
+    )
+    commute = CommuteSummary(
+        origin_name="Дом",
+        destination_name="Офис",
+        transport_mode="bike",
+        way_there=leg,
+        at_destination_temp_min=11.0,
+        at_destination_temp_max=13.0,
+        at_destination_condition_emoji="⛅",
+        at_destination_condition_text="Облачно",
+        way_back=leg.model_copy(update={"hour": 18, "is_rain": True, "precip_prob": 80}),
+        rain_on_way_there=False,
+        rain_on_way_back=True,
+        wind_warning=True,
+    )
+
+    advice = advisor.advise(summary, user, commute=commute)
+
+    assert any("дождевик" in item.lower() for item in advice.accessories)
+    assert not any("зонт" in item.lower() for item in advice.accessories)
+    assert "дождь" in advice.pro_tip.lower()

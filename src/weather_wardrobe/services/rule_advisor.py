@@ -1,15 +1,24 @@
 from __future__ import annotations
 
-from weather_wardrobe.models import DayWeatherSummary, OutfitAdvice, UserProfile
+from weather_wardrobe.models import CommuteSummary, DayWeatherSummary, OutfitAdvice, UserProfile
 
 
 class RuleBasedAdvisor:
-    """Zero-dependency deterministic outfit advisor based on apparent temp and alerts."""
+    """Zero-dependency deterministic outfit advisor based on apparent temp, alerts, and commute."""
 
-    def advise(self, summary: DayWeatherSummary, user: UserProfile) -> OutfitAdvice:
+    def advise(
+        self,
+        summary: DayWeatherSummary,
+        user: UserProfile,
+        commute: CommuteSummary | None = None,
+    ) -> OutfitAdvice:
         eff_avg = summary.feels_avg + user.comfort_offset
         eff_min = summary.feels_min + user.comfort_offset
         alerts = summary.alerts
+        commute_rain = bool(commute and (commute.rain_on_way_there or commute.rain_on_way_back))
+        any_rain = alerts.umbrella_required or commute_rain
+        is_bike = bool(commute and commute.transport_mode == "bike")
+        any_wind = alerts.strong_wind or bool(commute and commute.wind_warning)
 
         if eff_avg <= -10:
             headline = "Морозно — утепляйся по максимуму"
@@ -60,9 +69,15 @@ class RuleBasedAdvisor:
 
         accessories: list[str] = []
 
-        if alerts.umbrella_required:
-            rain_label = f" (дождь {alerts.rain_window})" if alerts.rain_window else ""
-            accessories.append(f"☂️ Зонт{rain_label}")
+        if any_rain:
+            if is_bike:
+                accessories.append("🧥 Дождевик или мембранная куртка")
+            elif alerts.umbrella_required:
+                rain_label = f" (дождь {alerts.rain_window})" if alerts.rain_window else ""
+                accessories.append(f"☂️ Зонт{rain_label}")
+            else:
+                accessories.append("☂️ Зонт (дождь в дороге)")
+
             if eff_avg > 23:
                 footwear = "Лёгкие непромокаемые кроссовки (без замши и ткани)"
             else:
@@ -76,7 +91,7 @@ class RuleBasedAdvisor:
             if "нескользящ" not in footwear and "протектор" not in footwear:
                 footwear = f"{footwear} с цепким протектором (возможен снег/гололёд)"
 
-        if alerts.strong_wind:
+        if any_wind:
             if outerwear == "Не нужна":
                 outerwear = "Лёгкая ветровка от сильного ветра"
             elif "ветр" not in outerwear.lower():
@@ -94,26 +109,33 @@ class RuleBasedAdvisor:
         if alerts.high_uv:
             accessories.append("🕶 Солнцезащитные очки и SPF-крем")
 
-        if alerts.big_temp_swing:
+        if commute and commute.rain_on_way_back and not commute.rain_on_way_there:
             pro_tip = (
-                f"Перепад температур за день {alerts.temp_swing_delta:g}°C — "
+                f"Утром сухо, но к {commute.way_back.hour:02d}:00 по дороге обратно пойдёт дождь."
+            )
+        elif is_bike and commute and commute.wind_warning:
+            pro_tip = (
+                f"На велосипеде ощущается встречный ветер до {commute.way_there.wind_speed_ms:.0f}"
+                " м/с — бери непродуваемую куртку и перчатки."
+            )
+        elif commute and commute.transport_mode == "transit" and summary.feels_min <= 8:
+            pro_tip = "Одевайся слоями, чтобы в тёплом транспорте было легко расстегнуться."
+        elif alerts.big_temp_swing:
+            pro_tip = (
+                f"Перепад за день {alerts.temp_swing_delta:g}°C — "
                 "одевайся слоями, чтобы не мёрзнуть утром и не жариться днём."
             )
         elif alerts.umbrella_required and alerts.rain_window:
-            pro_tip = (
-                f"Осадки ожидаются около {alerts.rain_window} — "
-                "проверь, чтобы зонт лежал в рюкзаке или у двери."
-            )
+            pro_tip = f"Дождь около {alerts.rain_window} — не забудь зонт перед выходом."
         elif alerts.strong_wind:
             pro_tip = (
                 f"Ветер до {summary.max_wind_ms:.0f} м/с "
-                f"(порывы до {summary.max_gusts_ms:.0f} м/с) — "
-                "закрытый ворот и ветрозащитный верх решают."
+                f"(порывы до {summary.max_gusts_ms:.0f} м/с) — закрытый ворот решает."
             )
         elif alerts.heat_risk:
-            pro_tip = "Жаркий день: бери воду с собой и отдавай предпочтение светлым тканям."
+            pro_tip = "Жаркий день: бери воду с собой и выбирай светлые дышащие ткани."
         else:
-            pro_tip = "Спокойная погода без резких сюрпризов — ориентируйся на базовые слои."
+            pro_tip = "Спокойная погода без сюрпризов — ориентируйся на базовые слои."
 
         return OutfitAdvice(
             headline=headline,
